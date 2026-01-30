@@ -1,0 +1,58 @@
+# ISAAC Lab specific
+/isaaclab/
+/logs/
+/outputs/
+*.log
+
+# Cache and build files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Weights and checkpoints
+*.pt
+*.pth
+*.ckpt
+weights/
+checkpoints/
+
+# Data files
+data/
+datasets/
+*.hdf5
+*.h5
+
+# Generated files
+*.pyc
+.coverage
+.pytest_cache/
