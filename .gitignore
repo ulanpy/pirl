@@ -46,7 +46,8 @@ ENV/
 weights/
 checkpoints/
 
-# Data files
+# Data and Docker files
+docker_data/
 data/
 datasets/
 *.hdf5
