@@ -1,0 +1,11 @@
+[package]
+name = "pinn_nav"
+authors = ["Ulan Sharipov"]
+description = "Physics Informed Deep RL for dynamic obstacle avoidance for caterpillar AGV"
+version = "0.1.0"
+
+[isaac]
+# This registers the directory as an Isaac Sim extension
+# The name here must match the directory name in source/extensions
+name = "pinn_nav"
+extension_path = "pinn_nav"

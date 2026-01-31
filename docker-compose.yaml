@@ -4,6 +4,8 @@ services:
     container_name: isaac_lab_pinn
     runtime: nvidia
     network_mode: host
+    entrypoint: /bin/bash 
+    command: -c "tail -f /dev/null" # висеть 
     environment:
       - DISPLAY=${DISPLAY}
       - NVIDIA_VISIBLE_DEVICES=all
