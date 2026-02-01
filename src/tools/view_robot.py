@@ -1,6 +1,6 @@
 import os
 import argparse
-from omni.isaac.kit import SimulationApp
+from isaacsim import SimulationApp
 
 # В этом режиме мы не передаем headless в SimulationApp, 
 # так как запуск через runheadless.sh сам всё настроит
@@ -12,12 +12,12 @@ simulation_app = SimulationApp({
 })
 
 # Принудительно включаем расширение стриминга
-from omni.isaac.core.utils.extensions import enable_extension
+from isaacsim.core.utils.extensions import enable_extension
 enable_extension("omni.kit.livestream.webrtc")
 
-import omni.isaac.core.utils.prims as prim_utils
-from omni.isaac.core.utils.viewports import set_camera_view
-from omni.isaac.core.world import World
+import isaacsim.core.utils.prims as prim_utils
+from isaacsim.core.utils.viewports import set_camera_view
+from isaacsim.core.world import World
 
 def main():
     world = World(stage_units_in_meters=1.0)

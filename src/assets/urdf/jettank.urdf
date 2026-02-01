@@ -43,14 +43,14 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="/workspace/IsaacLab/source/extensions/pinn_nav/pinn_nav/assets/meshes/lidar_link.stl"/>
+        <mesh filename="package://tank_description/meshes/lidar_link.stl"/>
       </geometry>
       <material name="black"/>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="/workspace/IsaacLab/source/extensions/pinn_nav/pinn_nav/assets/meshes/lidar_link.stl"/>
+        <mesh filename="package://tank_description/meshes/lidar_link.stl"/>
       </geometry>
     </collision>
   </link>
@@ -75,14 +75,14 @@
     <visual>
       <origin rpy="0 0 1.57" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="/workspace/IsaacLab/source/extensions/pinn_nav/pinn_nav/assets/meshes/depth_camera_link.stl"/>
+        <mesh filename="package://tank_description/meshes/depth_camera_link.stl"/>
       </geometry>
       <material name="black"/>
     </visual>
     <collision>
       <origin rpy="0 0 1.57" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="/workspace/IsaacLab/source/extensions/pinn_nav/pinn_nav/assets/meshes/depth_camera_link.stl"/>
+        <mesh filename="package://tank_description/meshes/depth_camera_link.stl"/>
       </geometry>
     </collision>
   </link>
@@ -113,7 +113,7 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="../meshes/base_link.stl"/>
+        <mesh filename="package://tank_description/meshes/base_link.stl"/>
       </geometry>
       <material name="green"/>
     </visual>
@@ -133,7 +133,7 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="/workspace/IsaacLab/source/extensions/pinn_nav/pinn_nav/assets/meshes/wheel.stl"/>
+        <mesh filename="package://tank_description/meshes/wheel.stl"/>
       </geometry>
       <material name="black">
       </material>
@@ -141,7 +141,7 @@
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="/workspace/IsaacLab/source/extensions/pinn_nav/pinn_nav/assets/meshes/wheel.stl"/>
+        <mesh filename="package://tank_description/meshes/wheel.stl"/>
       </geometry>
     </collision>
   </link>
@@ -160,7 +160,7 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0.01 0"/>
       <geometry>
-        <mesh filename="/workspace/IsaacLab/source/extensions/pinn_nav/pinn_nav/assets/meshes/back_shell_link.stl"/>
+        <mesh filename="package://tank_description/meshes/back_shell_link.stl"/>
       </geometry>
       <material name="black">
       </material>
@@ -168,7 +168,7 @@
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="/workspace/IsaacLab/source/extensions/pinn_nav/pinn_nav/assets/meshes/back_shell_link.stl"/>
+        <mesh filename="package://tank_description/meshes/back_shell_link.stl"/>
       </geometry>
     </collision>
   </link>

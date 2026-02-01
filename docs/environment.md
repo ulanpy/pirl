@@ -69,4 +69,4 @@ Use this for **local debugging** with zero latency (requires a local Linux machi
 - `./docker_data`: Local directory for persistent storage (cache, logs, data).
 
 ## 
-xhost +local: && docker exec -it isaac_lab_pinn ./runapp.sh
+xhost +local: && docker exec -it isaac_lab_pinn _isaac_sim/runapp.sh

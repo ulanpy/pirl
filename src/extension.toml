@@ -8,4 +8,4 @@ version = "0.1.0"
 # This registers the directory as an Isaac Sim extension
 # The name here must match the directory name in source/extensions
 name = "pinn_nav"
-extension_path = "pinn_nav"
+extension_path = "."

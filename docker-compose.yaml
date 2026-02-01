@@ -2,10 +2,11 @@ services:
   isaac-lab:
     build: .
     container_name: isaac_lab_pinn
+    user: "${UID}:${GID}"
     runtime: nvidia
     network_mode: host
-    entrypoint: /bin/bash 
-    command: -c "tail -f /dev/null" # висеть 
+    entrypoint: /bin/bash # чтобы скрипт образа не запускался на старте
+    command: -c "tail -f /dev/null" 
     environment:
       - DISPLAY=${DISPLAY}
       - NVIDIA_VISIBLE_DEVICES=all
