@@ -18,8 +18,8 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - $HOME/.Xauthority:/root/.Xauthority
       
-      # Твой репозиторий с обучением (папка src в корне проекта)
-      - ./src:/workspace/IsaacLab/source/extensions/pinn_nav
+      # Внешние проекты Isaac Lab (будут жить на хосте)
+      - ./projects:/workspace/projects
       
       # Постоянное хранилище (пути из официальной документации Isaac Lab)
       - ./docker_data/cache/kit:/isaac-sim/kit/cache:rw
