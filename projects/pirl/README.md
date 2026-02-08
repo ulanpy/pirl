@@ -72,6 +72,23 @@ If everything executes correctly, it should create a file .python.env in the `.v
 The file contains the python paths to all the extensions provided by Isaac Sim and Omniverse.
 This helps in indexing all the python modules for intelligent suggestions while writing code.
 
+**Notes (Cursor/VSCode):**
+- `tasks.json` is required for the `Tasks: Run Task` menu. If it is missing, run setup manually:
+  ` /isaac-sim/python.sh .vscode/tools/setup_vscode.py --isaac_path /isaac-sim `
+- `.vscode/settings.json` and `.vscode/launch.json` are generated locally and should not be committed.
+
+**Cursor IDE checklist (imports/intellisense):**
+- Select interpreter: `/isaac-sim/python.sh`.
+- If you see “Pylance not installed”, switch to Jedi in `.vscode/settings.json`:
+  `"python.languageServer": "Jedi"`.
+- Ensure extra paths are present (local-only) for Isaac Lab packages:
+  - `/workspace/IsaacLab/source/isaaclab`
+  - `/workspace/IsaacLab/source/isaaclab_assets`
+  - `/workspace/IsaacLab/source/isaaclab_tasks`
+- If Cursor still drops import highlighting, a working combo is:
+  - `Python (Anysphere)` + `Pyright` + `BasedPyright`
+  - Reason: Cursor’s Python tooling expects Pyright APIs and basedpyright reuses them, so Pyright keeps the extension pipeline alive.
+
 ### Setup as Omniverse Extension (Optional)
 
 We provide an example UI extension that will load upon enabling your extension defined in `source/pirl/pirl/ui_extension_example.py`.
