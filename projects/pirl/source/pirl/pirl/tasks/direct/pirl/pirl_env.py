@@ -18,6 +18,8 @@ import isaaclab.utils.math as math_utils
 from isaaclab.sim import XformPrimView
 
 from .pirl_env_cfg import PirlEnvCfg
+from .pirl_env_costmap import LocalCostmapBuilder
+from .pirl_env_rewards import compute_reward
 
 
 def define_markers(num_envs, device) -> VisualizationMarkers:
@@ -53,6 +55,9 @@ class PirlEnv(DirectRLEnv):
         self.yaws = torch.zeros((self.num_envs, 1), device=self.device)
         self.up_dir = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(self.num_envs, 1)
         self.marker_offset = torch.tensor([0.0, 0.0, 0.5], device=self.device).repeat(self.num_envs, 1)
+        
+        # Local grid buffers (Nav2-like costmap)
+        self.costmap = LocalCostmapBuilder(self.cfg, self.device, self.num_envs)
         
         # Obstacle movement state
         self.obstacle_time = torch.zeros(self.num_envs, device=self.device)
@@ -153,18 +158,32 @@ class PirlEnv(DirectRLEnv):
         cross = (self.forwards[:, 0] * self.commands[:, 1] - self.forwards[:, 1] * self.commands[:, 0]).unsqueeze(-1)
         # Forward speed in body frame
         forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
-        
-        obs = torch.hstack((dot, cross, forward_speed))
+
+        # Lidar ranges normalized to [0, 1]
+        # MultiMeshRayCaster stores hit positions; compute distances from ray starts
+        ray_hits_w = self.lidar.data.ray_hits_w
+        ray_starts_w = getattr(self.lidar, "_ray_starts_w", None)
+        if ray_starts_w is None:
+            raise RuntimeError("Lidar ray starts are not available for distance computation.")
+        lidar_ranges = torch.linalg.norm(ray_hits_w - ray_starts_w, dim=-1)
+        lidar_ranges = torch.where(
+            torch.isfinite(lidar_ranges),
+            lidar_ranges,
+            torch.tensor(self.cfg.lidar.max_distance, device=self.device),
+        )
+        lidar_ranges = torch.clamp(lidar_ranges, max=self.cfg.lidar.max_distance)
+        lidar_ranges_m = lidar_ranges
+
+        grid_obs = self.costmap.build(lidar_ranges_m)
+
+        obs = torch.hstack((dot, cross, forward_speed, grid_obs))
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
         forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
         alignment = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
         
-        # Reward = Speed * exp(Alignment) - Penalty
-        reward = forward_speed * torch.exp(alignment)
-        reward += self.has_collision.float() * self.cfg.rew_scale_collision
-        return reward
+        return compute_reward(forward_speed, alignment, self.has_collision, self.commands, self.cfg)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         # Check for collisions with a higher threshold
@@ -211,3 +230,5 @@ class PirlEnv(DirectRLEnv):
         # Reset sensors
         self.contact_sensor.reset(env_ids)
         self.lidar.reset(env_ids)
+        # Reset grid history
+        self.costmap.reset(env_ids)

@@ -12,6 +12,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 import isaaclab.sim as sim_utils
 from isaaclab.sensors import ContactSensorCfg, MultiMeshRayCasterCfg, patterns
+from isaaclab.markers.config import RAY_CASTER_MARKER_CFG
 import math
 
 @configclass
@@ -21,7 +22,25 @@ class PirlEnvCfg(DirectRLEnvCfg):
     episode_length_s = 15.0
     # - spaces definition
     action_space = 2
-    observation_space = 3 # dot, cross, forward_speed
+    # Real EAI G4: 360 deg, 0.28 deg resolution
+    # For now, limit rear visibility due to chassis occlusion and reduce rays for faster iteration
+    lidar_horizontal_fov_range = (-100.0, 100.0)
+    lidar_horizontal_res = 1.0
+    lidar_num_rays = math.ceil(
+        (lidar_horizontal_fov_range[1] - lidar_horizontal_fov_range[0]) / lidar_horizontal_res
+    ) + 1
+    if abs(abs(lidar_horizontal_fov_range[1] - lidar_horizontal_fov_range[0]) - 360.0) < 1e-6:
+        lidar_num_rays -= 1
+    # local costmap (Nav2-like defaults)
+    grid_size_m = 4.0
+    grid_resolution = 0.05
+    grid_width_cells = int(round(grid_size_m / grid_resolution))
+    grid_unknown_value = -1.0
+    grid_free_value = 0.0
+    grid_occupied_value = 100.0
+    grid_inflation_radius_m = 0.1
+    grid_history_len = 4
+    observation_space = 3 + (grid_width_cells * grid_width_cells * grid_history_len)
     state_space = 0
 
     # simulation
@@ -44,16 +63,26 @@ class PirlEnvCfg(DirectRLEnvCfg):
     
     lidar = MultiMeshRayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base_link",
-        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.1, 0.0, 0.1)),
-        mesh_prim_paths=["/World/envs/env_.*/Obstacle_.*"], 
+        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0225)),
+        mesh_prim_paths=["/World/envs/env_.*/Obstacle_.*"],
         pattern_cfg=patterns.LidarPatternCfg(
             channels=1,
             vertical_fov_range=(0.0, 0.0),
-            horizontal_fov_range=(0.0, 360.0),
-            horizontal_res=15.0,
+            horizontal_fov_range=lidar_horizontal_fov_range,
+            horizontal_res=lidar_horizontal_res,
         ),
-        max_distance=4.0,
-        debug_vis=False,
+        # Slightly above real range to ease debugging
+        max_distance=18.0,
+        debug_vis=True,
+        visualizer_cfg=RAY_CASTER_MARKER_CFG.replace(
+            prim_path="/Visuals/LidarHits",
+            markers={
+                "hit": sim_utils.SphereCfg(
+                    radius=0.05,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 0.0)),
+                ),
+            },
+        ),
     )
 
     # scene
@@ -76,8 +105,13 @@ class PirlEnvCfg(DirectRLEnvCfg):
     action_scale = 15.0
     
     # reward scales
-    rew_scale_collision = -20.0
-    rew_scale_velocity = 1.5
+    rew_scale_collision = -1.0
+    rew_scale_velocity = 2.5
+    # discourage driving backwards when rear is not observed
+    rew_scale_reverse = -2.0
+    # discourage standing still when command exists
+    rew_scale_standstill = -0.5
+    standstill_speed_threshold = 0.05
     
     # Custom params
     num_obstacles = 6
