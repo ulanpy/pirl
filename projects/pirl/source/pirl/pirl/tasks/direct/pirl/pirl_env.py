@@ -11,35 +11,14 @@ import torch
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.sensors import ContactSensor, MultiMeshRayCaster
-from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.sensors import MultiMeshRayCaster
 import isaaclab.utils.math as math_utils
 from isaaclab.sim import XformPrimView
 
 from .pirl_env_cfg import PirlEnvCfg
 from .pirl_env_costmap import LocalCostmapBuilder
-from .pirl_env_rewards import compute_reward
-
-
-def define_markers(num_envs, device) -> VisualizationMarkers:
-    """Define markers for robot orientation and command direction."""
-    marker_cfg = VisualizationMarkersCfg(
-        prim_path="/Visuals/myMarkers",
-        markers={
-            "forward": sim_utils.UsdFileCfg(
-                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                scale=(0.25, 0.25, 0.5),
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 1.0)),
-            ),
-            "command": sim_utils.UsdFileCfg(
-                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                scale=(0.25, 0.25, 0.5),
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
-            ),
-        },
-    )
-    return VisualizationMarkers(cfg=marker_cfg)
+from .pirl_env_path import LocalPathManager
+from .pirl_env_visuals import define_markers, define_path_markers, visualize_markers
 
 
 class PirlEnv(DirectRLEnv):
@@ -50,14 +29,17 @@ class PirlEnv(DirectRLEnv):
 
         self.dof_idx, _ = self.robot.find_joints(self.cfg.dof_names)
         # Initialize buffers
-        self.has_collision = torch.zeros((self.num_envs, 1), dtype=torch.bool, device=self.device)
         self.commands = torch.zeros((self.num_envs, 3), device=self.device)
         self.yaws = torch.zeros((self.num_envs, 1), device=self.device)
+        self.prev_target_dist = torch.zeros((self.num_envs, 1), device=self.device)
         self.up_dir = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(self.num_envs, 1)
         self.marker_offset = torch.tensor([0.0, 0.0, 0.5], device=self.device).repeat(self.num_envs, 1)
         
         # Local grid buffers (Nav2-like costmap)
         self.costmap = LocalCostmapBuilder(self.cfg, self.device, self.num_envs)
+
+        # Local path buffers
+        self.path_manager = LocalPathManager(self.cfg, self.device, self.num_envs)
         
         # Obstacle movement state
         self.obstacle_time = torch.zeros(self.num_envs, device=self.device)
@@ -65,8 +47,15 @@ class PirlEnv(DirectRLEnv):
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
-        # add ground plane
-        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
+        # add ground plane with explicit friction
+        ground_cfg = GroundPlaneCfg(
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=self.cfg.ground_static_friction,
+                dynamic_friction=self.cfg.ground_dynamic_friction,
+                friction_combine_mode=self.cfg.ground_friction_combine,
+            )
+        )
+        spawn_ground_plane(prim_path="/World/ground", cfg=ground_cfg)
         
         # Add obstacles at initial spread positions to avoid "cage" at (0,0)
         for i in range(self.cfg.num_obstacles):
@@ -92,21 +81,21 @@ class PirlEnv(DirectRLEnv):
             self.obstacle_views.append(view)
         
         # Initialize sensors
-        self.contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.lidar = MultiMeshRayCaster(self.cfg.lidar)
-        
-        self.scene.sensors["contact_sensor"] = self.contact_sensor
+
         self.scene.sensors["lidar"] = self.lidar
         
         # Initialize markers
-        self.visualization_markers = define_markers(self.num_envs, self.device)
+        self.visualization_markers = define_markers()
+        self.path_markers = define_path_markers()
         
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        self.actions = actions.clone()
+        # PPO actions are sampled from an unbounded Gaussian; clamp to keep in [-1, 1]
+        self.actions = torch.clamp(actions, -1.0, 1.0).clone()
         self._move_obstacles()
         self._visualize_markers()
 
@@ -126,24 +115,28 @@ class PirlEnv(DirectRLEnv):
             self.obstacle_views[i].set_world_poses(current_pos, torch.tensor([1, 0, 0, 0], device=self.device).repeat(self.num_envs, 1))
 
     def _visualize_markers(self):
-        # Get marker locations and orientations
-        marker_locations = self.robot.data.root_pos_w + self.marker_offset
-        forward_orientations = self.robot.data.root_quat_w
-        command_orientations = math_utils.quat_from_angle_axis(self.yaws.squeeze(-1), self.up_dir)
-
-        # Stack for visualization
-        locs = torch.vstack((marker_locations, marker_locations))
-        rots = torch.vstack((forward_orientations, command_orientations))
-        
-        # Indices: 0 for forward, 1 for command
-        indices = torch.hstack((
-            torch.zeros(self.num_envs, device=self.device, dtype=torch.long), 
-            torch.ones(self.num_envs, device=self.device, dtype=torch.long)
-        ))
-        self.visualization_markers.visualize(locs, rots, marker_indices=indices)
+        visualize_markers(
+            self.visualization_markers,
+            self.path_markers,
+            self.robot.data.root_pos_w,
+            self.robot.data.root_quat_w,
+            self.marker_offset,
+            self.yaws,
+            self.up_dir,
+            self.path_manager.path_points_w,
+            self.path_manager.path_idx,
+            self.cfg,
+            self.device,
+        )
 
     def _apply_action(self) -> None:
-        self.robot.set_joint_velocity_target(self.actions * self.cfg.action_scale, joint_ids=self.dof_idx)
+        # Map normalized actions to cmd_vel, then to wheel angular speeds
+        v = self.actions[:, 0] * self.cfg.max_lin_vel
+        w = self.actions[:, 1] * self.cfg.max_ang_vel
+        omega_r = (v + 0.5 * self.cfg.track_width * w) / self.cfg.wheel_radius
+        omega_l = (v - 0.5 * self.cfg.track_width * w) / self.cfg.wheel_radius
+        targets = torch.stack((omega_l, omega_r), dim=-1)
+        self.robot.set_joint_velocity_target(targets, joint_ids=self.dof_idx)
 
     def _get_observations(self) -> dict:
         # Calculate forward vector in world frame
@@ -152,6 +145,14 @@ class PirlEnv(DirectRLEnv):
             torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         )
         
+        # Update commands from local path target
+        robot_pos_w = self.robot.data.root_pos_w[:, :2]
+        self.commands, self.yaws, curr_idx = self.path_manager.update_commands(robot_pos_w)
+        # store current distance to target for progress reward
+        curr_targets_w = self.path_manager.path_points_w[torch.arange(self.num_envs, device=self.device), curr_idx]
+        to_target_w = curr_targets_w - robot_pos_w
+        self.curr_target_dist = torch.linalg.norm(to_target_w, dim=-1, keepdim=True)
+
         # Dot product: alignment (-1 to 1)
         dot = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
         # Cross product (z-component): turn direction
@@ -176,22 +177,38 @@ class PirlEnv(DirectRLEnv):
 
         grid_obs = self.costmap.build(lidar_ranges_m)
 
-        obs = torch.hstack((dot, cross, forward_speed, grid_obs))
+        # Local path segment in robot frame
+        path_obs = self.path_manager.get_segment(robot_pos_w, self.robot.data.root_quat_w, curr_idx)
+
+        obs = torch.hstack((dot, cross, forward_speed, path_obs, grid_obs))
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
         forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
-        alignment = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
-        
-        return compute_reward(forward_speed, alignment, self.has_collision, self.commands, self.cfg)
+
+        progress = self.prev_target_dist - self.curr_target_dist
+        self.prev_target_dist = self.curr_target_dist
+        reward = progress * self.cfg.rew_scale_progress
+        # penalize proximity to obstacles from costmap
+        danger = self.costmap.get_danger_score()
+        reward += torch.where(
+            danger > self.cfg.costmap_danger_threshold,
+            (danger - self.cfg.costmap_danger_threshold) * self.cfg.rew_scale_costmap,
+            0.0,
+        )
+        # penalize reversing into unknown space
+        reverse_speed = torch.clamp(-forward_speed, min=0.0)
+        rear_unknown = self.costmap.get_unknown_ratio_rear()
+        reward += torch.where(
+            rear_unknown > self.cfg.reverse_unknown_threshold,
+            reverse_speed * (rear_unknown - self.cfg.reverse_unknown_threshold) * self.cfg.rew_scale_reverse_unknown,
+            0.0,
+        )
+        return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        # Check for collisions with a higher threshold
-        collision_forces = torch.linalg.norm(self.contact_sensor.data.net_forces_w_history, dim=-1)
-        self.has_collision = torch.any(collision_forces > 300.0, dim=(1, 2)).unsqueeze(-1)
-        
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        die = self.has_collision.squeeze(-1)
+        die = self.path_manager.path_idx >= (self.cfg.path_num_points - 1)
         return die, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -214,11 +231,6 @@ class PirlEnv(DirectRLEnv):
             world_pos[:, 2] = 0.25
             self.obstacle_views[i].set_world_poses(world_pos, torch.tensor([1, 0, 0, 0], device=self.device).repeat(len(env_ids), 1), env_ids)
 
-        # New random commands
-        new_cmds = torch.randn((len(env_ids), 3), device=self.device)
-        new_cmds[:, 2] = 0.0
-        self.commands[env_ids] = new_cmds / torch.linalg.norm(new_cmds, dim=1, keepdim=True)
-        self.yaws[env_ids] = torch.atan2(self.commands[env_ids, 1], self.commands[env_ids, 0]).unsqueeze(-1)
         self.obstacle_time[env_ids] = 0.0
 
         # Reset robot state
@@ -228,7 +240,15 @@ class PirlEnv(DirectRLEnv):
         self.robot.write_root_state_to_sim(root_state, env_ids)
         
         # Reset sensors
-        self.contact_sensor.reset(env_ids)
         self.lidar.reset(env_ids)
         # Reset grid history
         self.costmap.reset(env_ids)
+        # Reset path points
+        env_origins = self.scene.env_origins[env_ids, :2]
+        self.path_manager.reset(env_ids, env_origins)
+        # Reset progress tracking
+        robot_pos_w = self.robot.data.root_pos_w[env_ids, :2]
+        curr_idx = self.path_manager.path_idx[env_ids]
+        curr_targets_w = self.path_manager.path_points_w[env_ids, curr_idx]
+        to_target_w = curr_targets_w - robot_pos_w
+        self.prev_target_dist[env_ids] = torch.linalg.norm(to_target_w, dim=-1, keepdim=True)

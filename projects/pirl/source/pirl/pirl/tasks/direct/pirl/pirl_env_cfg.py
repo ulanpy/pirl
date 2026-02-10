@@ -11,7 +11,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 import isaaclab.sim as sim_utils
-from isaaclab.sensors import ContactSensorCfg, MultiMeshRayCasterCfg, patterns
+from isaaclab.sensors import MultiMeshRayCasterCfg, patterns
 from isaaclab.markers.config import RAY_CASTER_MARKER_CFG
 import math
 
@@ -32,19 +32,31 @@ class PirlEnvCfg(DirectRLEnvCfg):
     if abs(abs(lidar_horizontal_fov_range[1] - lidar_horizontal_fov_range[0]) - 360.0) < 1e-6:
         lidar_num_rays -= 1
     # local costmap (Nav2-like defaults)
-    grid_size_m = 4.0
-    grid_resolution = 0.05
-    grid_width_cells = int(round(grid_size_m / grid_resolution))
-    grid_unknown_value = -1.0
-    grid_free_value = 0.0
-    grid_occupied_value = 100.0
-    grid_inflation_radius_m = 0.1
-    grid_history_len = 4
-    observation_space = 3 + (grid_width_cells * grid_width_cells * grid_history_len)
+    grid_size_m = 3.0  # rolling window size (meters)
+    grid_resolution = 0.05  # cell size (meters)
+    grid_width_cells = int(round(grid_size_m / grid_resolution))  # grid width/height in cells
+    grid_free_cost = 0.0  # Nav2 free space cost
+    grid_inscribed_cost = 253.0  # Nav2 inscribed inflated obstacle cost
+    grid_lethal_cost = 254.0  # Nav2 lethal obstacle cost
+    grid_unknown_cost = 255.0  # Nav2 unknown space cost
+    grid_inflation_radius_m = 0.15  # inflation radius (meters)
+    grid_cost_scaling_factor = 10.0  # inflation exponential decay factor
+    grid_history_len = 4  # number of stacked costmaps
+    grid_normalize = True  # normalize costs for RL input
+    # local path segment (Nav2-like: controller uses a local slice of the global path)
+    path_num_points = 20  # total points in generated path
+    path_segment_len = 1  # points provided to policy
+    path_radius_range = (0.6, 2.0)  # path points distance from env origin (meters)
+    path_goal_threshold = 0.25  # distance to advance to next path point (meters)
+    observation_space = 3 + (path_segment_len * 2) + (grid_width_cells * grid_width_cells * grid_history_len)
     state_space = 0
 
     # simulation
     sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
+    # ground friction
+    ground_static_friction = 0.7
+    ground_dynamic_friction = 0.7
+    ground_friction_combine = "max"
 
     # robot(s)
     robot_cfg: ArticulationCfg = JETTANK_CFG.replace(
@@ -53,14 +65,6 @@ class PirlEnvCfg(DirectRLEnvCfg):
     robot_cfg.init_state.pos = (0.0, 0.0, 0.06) 
     
     # sensors
-    contact_sensor = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot/base_link", 
-        update_period=0.0, 
-        history_length=3, 
-        debug_vis=False,
-        filter_prim_paths_expr=["/World/envs/env_.*/Obstacle_.*"]
-    )
-    
     lidar = MultiMeshRayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base_link",
         offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0225)),
@@ -73,7 +77,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
         ),
         # Slightly above real range to ease debugging
         max_distance=18.0,
-        debug_vis=True,
+        debug_vis=False,
         visualizer_cfg=RAY_CASTER_MARKER_CFG.replace(
             prim_path="/Visuals/LidarHits",
             markers={
@@ -87,7 +91,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
 
     # scene
     # Narrower spacing: 4.0m
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=100, env_spacing=4.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=50, env_spacing=4.0, replicate_physics=True)
 
     # obstacles
     obstacle_cfg = sim_utils.CylinderCfg(
@@ -98,20 +102,29 @@ class PirlEnvCfg(DirectRLEnvCfg):
         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
     )
 
-    # controllable joints
-    dof_names = [".*_wheel_joint"]
+    # controllable joints (explicit left/right order)
+    dof_names = ["left_wheel_joint", "right_wheel_joint"]
 
-    # action scale
-    action_scale = 15.0
+    # cmd_vel limits and robot geometry (for wheel speed conversion)
+    max_lin_vel = 1.0  # m/s
+    max_ang_vel = 0.5  # rad/s
+    wheel_radius = 0.03  # m (60mm diameter)
+    track_width = 0.242  # m
     
     # reward scales
-    rew_scale_collision = -1.0
-    rew_scale_velocity = 2.5
-    # discourage driving backwards when rear is not observed
     rew_scale_reverse = -2.0
-    # discourage standing still when command exists
-    rew_scale_standstill = -0.5
+    rew_scale_standstill = 0.0
     standstill_speed_threshold = 0.05
+    rew_scale_spin = -0.5
+    spin_rate_threshold = 0.5
+    # reverse in unknown space penalty
+    rew_scale_reverse_unknown = -1.0
+    reverse_unknown_threshold = 0.3
+    # reward progress toward current path point
+    rew_scale_progress = 1.0
+    # costmap proximity penalty
+    rew_scale_costmap = -1.0
+    costmap_danger_threshold = 0.7
     
     # Custom params
     num_obstacles = 6

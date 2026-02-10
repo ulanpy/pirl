@@ -37,6 +37,10 @@ JETTANK_CFG = ArticulationCfg(
         ),
     ),
     actuators={
-        "wheel_acts": ImplicitActuatorCfg(joint_names_expr=[".*_wheel_joint"], stiffness=0.0, damping=100.0),
+        "wheel_acts": ImplicitActuatorCfg(
+            joint_names_expr=["left_wheel_joint", "right_wheel_joint"],
+            stiffness=0.0,
+            damping=100.0,
+        ),
     },
 )

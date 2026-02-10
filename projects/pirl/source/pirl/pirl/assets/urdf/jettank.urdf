@@ -12,7 +12,7 @@
   <joint name="base_joint" type="fixed">
     <parent link="base_footprint"/>
     <child link="base_link"/>
-    <origin rpy="0 0 0" xyz="0.0 0.0 0.05"/>
+    <origin rpy="0 0 0" xyz="0.0 0.0 0.0"/>
   </joint>
 
   <!-- Base Link (Chassis) -->
@@ -22,19 +22,122 @@
       <inertia ixx="0.00449" ixy="0" ixz="0" iyy="0.01345" iyz="0" izz="0.01456"/>
     </inertial>
     <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <box size="0.297 0.145 0.11255"/>
+        <mesh filename="../meshes/base_link.stl"/>
       </geometry>
       <material name="green"/>
     </visual>
     <collision>
+      <origin rpy="0 0 0" xyz="0.0004 0 0.08684214"/>
       <geometry>
         <box size="0.297 0.145 0.11255"/>
       </geometry>
     </collision>
   </link>
 
-  <!-- Left Wheel -->
+  <!-- Lidar -->
+  <link name="lidar_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.0157049 0.0003408 -0.0214732"/>
+      <mass value="0.0522536"/>
+      <inertia ixx="1.45429E-05" ixy="4.81937E-08" ixz="2.30575E-07" iyy="1.85619E-05" iyz="-1.29750E-08" izz="3.10574E-05"/>
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <mesh filename="../meshes/lidar_link.stl"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <mesh filename="../meshes/lidar_link.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="lidar_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0959394 -0.0000104 0.1283962"/>
+    <parent link="base_link"/>
+    <child link="lidar_link"/>
+    <axis xyz="0 0 0"/>
+  </joint>
+
+  <!-- Camera -->
+  <link name="camera_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.0002543 0.0026803 -0.0056908"/>
+      <mass value="0.2279804"/>
+      <inertia ixx="4.84732E-05" ixy="8.29315E-09" ixz="-5.09526E-09" iyy="0.00040882" iyz="-1.36580E-07" izz="0.00042955"/>
+    </inertial>
+    <visual>
+      <origin rpy="0 0 1.57" xyz="0 0 0"/>
+      <geometry>
+        <mesh filename="../meshes/depth_camera_link.stl"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 1.57" xyz="0 0 0"/>
+      <geometry>
+        <mesh filename="../meshes/depth_camera_link.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="camera_joint" type="fixed">
+    <origin rpy="-0.0001315 0 0" xyz="0.0288581 0 0.2020933"/>
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <axis xyz="0 0 0"/>
+  </joint>
+
+  <!-- Back shell -->
+  <link name="back_shell_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.0000123 0.0021857 -0.0500523"/>
+      <mass value="0.0663479"/>
+      <inertia ixx="5.65278E-05" ixy="-5.13394E-11" ixz="-4.07561E-11" iyy="4.33741E-05" iyz="-5.43059E-06" izz="6.86643E-05"/>
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0.01 0"/>
+      <geometry>
+        <mesh filename="../meshes/back_shell_link.stl"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <mesh filename="../meshes/back_shell_link.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="back_shell_joint" type="fixed">
+    <origin rpy="-3.1416 0 1.5708" xyz="-0.076481 0 0.082796"/>
+    <parent link="base_link"/>
+    <child link="back_shell_link"/>
+    <axis xyz="0 0 0"/>
+  </joint>
+
+  <!-- Track visual (static mesh) -->
+  <link name="track_visual">
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <mesh filename="../meshes/wheel.stl"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+  </link>
+  <joint name="track_visual_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <parent link="base_link"/>
+    <child link="track_visual"/>
+    <axis xyz="0 0 0"/>
+  </joint>
+
+  <!-- Left drive wheel (sprocket) -->
   <link name="left_wheel">
     <inertial>
       <mass value="0.1"/>
@@ -54,15 +157,14 @@
       </geometry>
     </collision>
   </link>
-
   <joint name="left_wheel_joint" type="continuous">
     <parent link="base_link"/>
     <child link="left_wheel"/>
-    <origin rpy="0 0 0" xyz="0.1 0.08 -0.025"/>
+    <origin rpy="0 0 0" xyz="-0.06 0.08 -0.02"/>
     <axis xyz="0 1 0"/>
   </joint>
 
-  <!-- Right Wheel -->
+  <!-- Right drive wheel (sprocket) -->
   <link name="right_wheel">
     <inertial>
       <mass value="0.1"/>
@@ -82,42 +184,69 @@
       </geometry>
     </collision>
   </link>
-
   <joint name="right_wheel_joint" type="continuous">
     <parent link="base_link"/>
     <child link="right_wheel"/>
-    <origin rpy="0 0 0" xyz="0.1 -0.08 -0.025"/>
+    <origin rpy="0 0 0" xyz="-0.06 -0.08 -0.02"/>
     <axis xyz="0 1 0"/>
   </joint>
 
-  <!-- Lidar (Simplified) -->
-  <link name="lidar_link">
-    <visual>
+  <!-- Front skid (collision-only support to prevent nose diving) -->
+  <link name="front_skid">
+    <collision>
+      <origin rpy="0 0 0" xyz="0.12 0 -0.045"/>
       <geometry>
-        <cylinder length="0.03" radius="0.03"/>
+        <box size="0.10 0.10 0.02"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="front_skid_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="front_skid"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <axis xyz="0 0 0"/>
+  </joint>
+
+  <!-- Passive rollers (approximation) -->
+
+  <link name="left_roller_rear">
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00005"/>
+    </inertial>
+    <visual>
+      <origin rpy="1.570796 0 0" xyz="0 0 0"/>
+      <geometry>
+        <cylinder length="0.04" radius="0.03"/>
       </geometry>
       <material name="black"/>
     </visual>
   </link>
-  <joint name="lidar_joint" type="fixed">
+  <joint name="left_roller_rear_joint" type="continuous">
     <parent link="base_link"/>
-    <child link="lidar_link"/>
-    <origin xyz="0.1 0 0.1" rpy="0 0 0"/>
+    <child link="left_roller_rear"/>
+    <origin rpy="0 0 0" xyz="-0.14 0.08 -0.03"/>
+    <axis xyz="0 1 0"/>
   </joint>
 
-  <!-- Camera (Simplified) -->
-  <link name="camera_link">
+
+  <link name="right_roller_rear">
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00005"/>
+    </inertial>
     <visual>
+      <origin rpy="1.570796 0 0" xyz="0 0 0"/>
       <geometry>
-        <box size="0.02 0.05 0.02"/>
+        <cylinder length="0.04" radius="0.03"/>
       </geometry>
       <material name="black"/>
     </visual>
   </link>
-  <joint name="camera_joint" type="fixed">
+  <joint name="right_roller_rear_joint" type="continuous">
     <parent link="base_link"/>
-    <child link="camera_link"/>
-    <origin xyz="0.14 0 0.05" rpy="0 0 0"/>
+    <child link="right_roller_rear"/>
+    <origin rpy="0 0 0" xyz="-0.14 -0.08 -0.03"/>
+    <axis xyz="0 1 0"/>
   </joint>
-
 </robot>
