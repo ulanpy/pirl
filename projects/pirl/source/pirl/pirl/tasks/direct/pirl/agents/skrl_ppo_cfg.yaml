@@ -13,18 +13,42 @@ models:
     max_log_std: 2.0
     initial_log_std: 0.0
     network:
+      - name: vec_net
+        input: OBSERVATIONS["vec"]
+        layers: [64, 64]
+        activations: elu
+      - name: cnn_net
+        input: OBSERVATIONS["costmap"]
+        layers:
+          - conv2d: [16, 3, [2, 2]]
+          - conv2d: [32, 3, [2, 2]]
+          - flatten
+          - 128
+        activations: elu
       - name: net
-        input: OBSERVATIONS
-        layers: [128, 128]
+        input: concatenate([vec_net, cnn_net])
+        layers: [256, 128]
         activations: elu
     output: ACTIONS
   value:  # see deterministic_model parameters
     class: DeterministicMixin
     clip_actions: False
     network:
+      - name: vec_net
+        input: OBSERVATIONS["vec"]
+        layers: [64, 64]
+        activations: elu
+      - name: cnn_net
+        input: OBSERVATIONS["costmap"]
+        layers:
+          - conv2d: [16, 3, [2, 2]]
+          - conv2d: [32, 3, [2, 2]]
+          - flatten
+          - 128
+        activations: elu
       - name: net
-        input: OBSERVATIONS
-        layers: [128, 128]
+        input: concatenate([vec_net, cnn_net])
+        layers: [256, 128]
         activations: elu
     output: ONE
 

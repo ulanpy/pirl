@@ -14,6 +14,8 @@ import isaaclab.sim as sim_utils
 from isaaclab.sensors import MultiMeshRayCasterCfg, patterns
 from isaaclab.markers.config import RAY_CASTER_MARKER_CFG
 import math
+import gymnasium as gym
+import numpy as np
 
 @configclass
 class PirlEnvCfg(DirectRLEnvCfg):
@@ -32,7 +34,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     if abs(abs(lidar_horizontal_fov_range[1] - lidar_horizontal_fov_range[0]) - 360.0) < 1e-6:
         lidar_num_rays -= 1
     # local costmap (Nav2-like defaults)
-    grid_size_m = 3.0  # rolling window size (meters)
+    grid_size_m = 1.6  # rolling window size (meters)
     grid_resolution = 0.05  # cell size (meters)
     grid_width_cells = int(round(grid_size_m / grid_resolution))  # grid width/height in cells
     grid_free_cost = 0.0  # Nav2 free space cost
@@ -41,14 +43,29 @@ class PirlEnvCfg(DirectRLEnvCfg):
     grid_unknown_cost = 255.0  # Nav2 unknown space cost
     grid_inflation_radius_m = 0.15  # inflation radius (meters)
     grid_cost_scaling_factor = 10.0  # inflation exponential decay factor
-    grid_history_len = 4  # number of stacked costmaps
+    grid_history_len = 1  # number of stacked costmaps
     grid_normalize = True  # normalize costs for RL input
     # local path segment (Nav2-like: controller uses a local slice of the global path)
     path_num_points = 20  # total points in generated path
     path_segment_len = 1  # points provided to policy
     path_radius_range = (0.6, 2.0)  # path points distance from env origin (meters)
     path_goal_threshold = 0.25  # distance to advance to next path point (meters)
-    observation_space = 3 + (path_segment_len * 2) + (grid_width_cells * grid_width_cells * grid_history_len)
+    observation_space = gym.spaces.Dict(
+        {
+            "vec": gym.spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(3 + (path_segment_len * 2),),
+                dtype=np.float32,
+            ),
+            "costmap": gym.spaces.Box(
+                low=-1.0,
+                high=1.0,
+                shape=(grid_history_len, grid_width_cells, grid_width_cells),
+                dtype=np.float32,
+            ),
+        }
+    )
     state_space = 0
 
     # simulation
@@ -106,25 +123,26 @@ class PirlEnvCfg(DirectRLEnvCfg):
     dof_names = ["left_wheel_joint", "right_wheel_joint"]
 
     # cmd_vel limits and robot geometry (for wheel speed conversion)
-    max_lin_vel = 1.0  # m/s
+    max_lin_vel = 0.5  # m/s
     max_ang_vel = 0.5  # rad/s
     wheel_radius = 0.03  # m (60mm diameter)
     track_width = 0.242  # m
     
     # reward scales
-    rew_scale_reverse = -2.0
-    rew_scale_standstill = 0.0
+    rew_scale_reverse = -0.8
+    rew_scale_standstill = -0.5
     standstill_speed_threshold = 0.05
-    rew_scale_spin = -0.5
+    rew_scale_spin = 0.0
     spin_rate_threshold = 0.5
-    # reverse in unknown space penalty
-    rew_scale_reverse_unknown = -1.0
-    reverse_unknown_threshold = 0.3
     # reward progress toward current path point
     rew_scale_progress = 1.0
-    # costmap proximity penalty
-    rew_scale_costmap = -1.0
-    costmap_danger_threshold = 0.7
+    # one-time bonus when reaching each path point
+    rew_goal_bonus = 2.0
+    # small per-step penalty (must stay much smaller than goal bonus)
+    rew_step_penalty = -0.01
+    # collision penalty (applied on obstacle contact)
+    rew_scale_collision = -2.0
+    collision_robot_radius = 0.18
     
     # Custom params
     num_obstacles = 6

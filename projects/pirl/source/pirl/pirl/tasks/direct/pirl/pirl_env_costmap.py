@@ -49,6 +49,15 @@ class LocalCostmapBuilder:
             self.grid_history[env_ids] = self.cfg.grid_unknown_cost
 
     def build(self, lidar_ranges_m: torch.Tensor) -> torch.Tensor:
+        """Build and return flattened costmap history for MLP-style consumers."""
+        grid_history_norm = self._build_grid_history(lidar_ranges_m)
+        return grid_history_norm.reshape(self.num_envs, -1)
+
+    def build_image(self, lidar_ranges_m: torch.Tensor) -> torch.Tensor:
+        """Build and return NCHW costmap history for CNN-style consumers."""
+        return self._build_grid_history(lidar_ranges_m)
+
+    def _build_grid_history(self, lidar_ranges_m: torch.Tensor) -> torch.Tensor:
         grid = torch.full(
             (self.num_envs, self.grid_width_cells, self.grid_width_cells),
             self.cfg.grid_unknown_cost,
@@ -122,7 +131,7 @@ class LocalCostmapBuilder:
 
         self.grid_history = torch.roll(self.grid_history, shifts=1, dims=1)
         self.grid_history[:, 0] = grid
-        grid_obs = self.grid_history.reshape(self.num_envs, -1)
+        grid_obs = self.grid_history
         if self.cfg.grid_normalize:
             grid_obs = torch.where(
                 grid_obs == self.cfg.grid_unknown_cost,

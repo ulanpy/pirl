@@ -32,6 +32,7 @@ class PirlEnv(DirectRLEnv):
         self.commands = torch.zeros((self.num_envs, 3), device=self.device)
         self.yaws = torch.zeros((self.num_envs, 1), device=self.device)
         self.prev_target_dist = torch.zeros((self.num_envs, 1), device=self.device)
+        self.prev_path_idx = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.up_dir = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(self.num_envs, 1)
         self.marker_offset = torch.tensor([0.0, 0.0, 0.5], device=self.device).repeat(self.num_envs, 1)
         
@@ -175,41 +176,47 @@ class PirlEnv(DirectRLEnv):
         lidar_ranges = torch.clamp(lidar_ranges, max=self.cfg.lidar.max_distance)
         lidar_ranges_m = lidar_ranges
 
-        grid_obs = self.costmap.build(lidar_ranges_m)
+        grid_obs = self.costmap.build_image(lidar_ranges_m)
 
         # Local path segment in robot frame
         path_obs = self.path_manager.get_segment(robot_pos_w, self.robot.data.root_quat_w, curr_idx)
 
-        obs = torch.hstack((dot, cross, forward_speed, path_obs, grid_obs))
-        return {"policy": obs}
+        vec_obs = torch.hstack((dot, cross, forward_speed, path_obs))
+        return {"policy": {"vec": vec_obs, "costmap": grid_obs}}
 
     def _get_rewards(self) -> torch.Tensor:
-        forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
-
         progress = self.prev_target_dist - self.curr_target_dist
         self.prev_target_dist = self.curr_target_dist
         reward = progress * self.cfg.rew_scale_progress
-        # penalize proximity to obstacles from costmap
-        danger = self.costmap.get_danger_score()
-        reward += torch.where(
-            danger > self.cfg.costmap_danger_threshold,
-            (danger - self.cfg.costmap_danger_threshold) * self.cfg.rew_scale_costmap,
-            0.0,
-        )
-        # penalize reversing into unknown space
-        reverse_speed = torch.clamp(-forward_speed, min=0.0)
-        rear_unknown = self.costmap.get_unknown_ratio_rear()
-        reward += torch.where(
-            rear_unknown > self.cfg.reverse_unknown_threshold,
-            reverse_speed * (rear_unknown - self.cfg.reverse_unknown_threshold) * self.cfg.rew_scale_reverse_unknown,
-            0.0,
-        )
+        # bonus when a path goal point is reached (index advanced)
+        reached_goal = self.path_manager.path_idx > self.prev_path_idx
+        reward += reached_goal.unsqueeze(-1).float() * self.cfg.rew_goal_bonus
+        self.prev_path_idx = self.path_manager.path_idx.clone()
+
+        # penalize only actual obstacle contact (collision in XY)
+        has_collision = self._compute_collision_mask()
+        reward += has_collision.float() * self.cfg.rew_scale_collision
+        # small time penalty to encourage faster completion
+        reward += self.cfg.rew_step_penalty
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        die = self.path_manager.path_idx >= (self.cfg.path_num_points - 1)
+        path_done = self.path_manager.path_idx >= (self.cfg.path_num_points - 1)
+        collision_done = self._compute_collision_mask().squeeze(-1)
+        die = path_done | collision_done
         return die, time_out
+
+    def _compute_collision_mask(self) -> torch.Tensor:
+        """Return [num_envs, 1] bool collision mask using XY overlap with obstacle cylinders."""
+        robot_pos_xy = self.robot.data.root_pos_w[:, :2]
+        collision_distance = self.cfg.collision_robot_radius + self.cfg.obstacle_cfg.radius
+        has_collision = torch.zeros((self.num_envs, 1), dtype=torch.bool, device=self.device)
+        for i in range(self.cfg.num_obstacles):
+            obstacle_pos_xy = self.scene.env_origins[:, :2] + self.obstacle_initial_pos[i][:, :2]
+            dist = torch.linalg.norm(robot_pos_xy - obstacle_pos_xy, dim=-1, keepdim=True)
+            has_collision |= dist <= collision_distance
+        return has_collision
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
@@ -252,3 +259,4 @@ class PirlEnv(DirectRLEnv):
         curr_targets_w = self.path_manager.path_points_w[env_ids, curr_idx]
         to_target_w = curr_targets_w - robot_pos_w
         self.prev_target_dist[env_ids] = torch.linalg.norm(to_target_w, dim=-1, keepdim=True)
+        self.prev_path_idx[env_ids] = self.path_manager.path_idx[env_ids]
