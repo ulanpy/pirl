@@ -18,6 +18,13 @@ class LocalCostmapBuilder:
             cfg.grid_unknown_cost,
             device=device,
         )
+        # (num_envs, grid_history_len, 3): world xy + yaw when each frame was captured
+        self._pose_history = torch.zeros(
+            (num_envs, cfg.grid_history_len, 3),
+            device=device,
+        )
+        self._history_interval = getattr(cfg, "grid_history_interval_steps", 1)
+        self._step_count = 0
         # Precompute grid cell centers (meters in base_link frame)
         centers_1d = (torch.arange(self.grid_width_cells, device=device) + 0.5) * self.grid_resolution
         centers_1d = centers_1d - self.grid_half_size
@@ -45,19 +52,82 @@ class LocalCostmapBuilder:
     def reset(self, env_ids):
         if env_ids is None:
             self.grid_history[:] = self.cfg.grid_unknown_cost
+            self._pose_history.zero_()
         else:
             self.grid_history[env_ids] = self.cfg.grid_unknown_cost
+            self._pose_history[env_ids] = 0.0
+        self._step_count = 0
 
-    def build(self, lidar_ranges_m: torch.Tensor) -> torch.Tensor:
+    def build(
+        self,
+        lidar_ranges_m: torch.Tensor,
+        robot_pos_w: torch.Tensor | None = None,
+        robot_yaw: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Build and return flattened costmap history for MLP-style consumers."""
-        grid_history_norm = self._build_grid_history(lidar_ranges_m)
+        grid_history_norm = self._build_grid_history(lidar_ranges_m, robot_pos_w, robot_yaw)
         return grid_history_norm.reshape(self.num_envs, -1)
 
-    def build_image(self, lidar_ranges_m: torch.Tensor) -> torch.Tensor:
-        """Build and return NCHW costmap history for CNN-style consumers."""
-        return self._build_grid_history(lidar_ranges_m)
+    def build_image(
+        self,
+        lidar_ranges_m: torch.Tensor,
+        robot_pos_w: torch.Tensor | None = None,
+        robot_yaw: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Build and return NCHW costmap history for CNN-style consumers.
+        If robot_pos_w (num_envs, 2) and robot_yaw (num_envs,) are provided, past
+        frames are warped into the current robot body frame.
+        """
+        return self._build_grid_history(lidar_ranges_m, robot_pos_w, robot_yaw)
 
-    def _build_grid_history(self, lidar_ranges_m: torch.Tensor) -> torch.Tensor:
+    def _warp_grid_to_current_frame(
+        self,
+        grid_past: torch.Tensor,
+        pos_past: torch.Tensor,
+        yaw_past: torch.Tensor,
+        pos_cur: torch.Tensor,
+        yaw_cur: torch.Tensor,
+    ) -> torch.Tensor:
+        """Warp grid_past (one env, H, W) from past body frame to current body frame.
+        grid_past: (H, W), pos/yaw past and cur: scalars or 0-dim.
+        Returns (H, W) in current frame.
+        """
+        # Current body cell centers (H*W, 2)
+        centers = self.grid_centers
+        x_b, y_b = centers[:, 0], centers[:, 1]
+        cos_c = torch.cos(yaw_cur).to(x_b.dtype)
+        sin_c = torch.sin(yaw_cur).to(x_b.dtype)
+        cos_p = torch.cos(yaw_past).to(x_b.dtype)
+        sin_p = torch.sin(yaw_past).to(x_b.dtype)
+        # Current body -> world
+        wx = cos_c * x_b - sin_c * y_b + pos_cur[0]
+        wy = sin_c * x_b + cos_c * y_b + pos_cur[1]
+        # World -> past body
+        dx = wx - pos_past[0]
+        dy = wy - pos_past[1]
+        x_old = cos_p * dx + sin_p * dy
+        y_old = -sin_p * dx + cos_p * dy
+        # Past body -> grid indices
+        col_f = (x_old + self.grid_half_size) / self.grid_resolution
+        row_f = (y_old + self.grid_half_size) / self.grid_resolution
+        in_bounds = (
+            (row_f >= 0)
+            & (row_f < self.grid_width_cells)
+            & (col_f >= 0)
+            & (col_f < self.grid_width_cells)
+        )
+        row = row_f.long().clamp(0, self.grid_width_cells - 1)
+        col = col_f.long().clamp(0, self.grid_width_cells - 1)
+        out_flat = grid_past[row, col].clone()
+        out_flat[~in_bounds] = self.cfg.grid_unknown_cost
+        return out_flat.reshape(self.grid_width_cells, self.grid_width_cells)
+
+    def _build_grid_history(
+        self,
+        lidar_ranges_m: torch.Tensor,
+        robot_pos_w: torch.Tensor | None = None,
+        robot_yaw: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         grid = torch.full(
             (self.num_envs, self.grid_width_cells, self.grid_width_cells),
             self.cfg.grid_unknown_cost,
@@ -129,9 +199,33 @@ class LocalCostmapBuilder:
                     grid[env_idx],
                 )
 
-        self.grid_history = torch.roll(self.grid_history, shifts=1, dims=1)
-        self.grid_history[:, 0] = grid
+        # Update history buffer only every N steps so that grid_history_len frames span ~1 s
+        if self._step_count % self._history_interval == 0:
+            self.grid_history = torch.roll(self.grid_history, shifts=1, dims=1)
+            self.grid_history[:, 0] = grid
+            if robot_pos_w is not None and robot_yaw is not None:
+                self._pose_history = torch.roll(self._pose_history, shifts=1, dims=1)
+                self._pose_history[:, 0, :2] = robot_pos_w
+                y = robot_yaw.squeeze(-1) if robot_yaw.dim() > 1 else robot_yaw
+                self._pose_history[:, 0, 2] = y
+        self._step_count += 1
         grid_obs = self.grid_history
+        # Warp past frames into current robot body frame when pose is provided
+        if (
+            robot_pos_w is not None
+            and robot_yaw is not None
+            and self.cfg.grid_history_len > 1
+        ):
+            grid_obs = grid_obs.clone()
+            for e in range(self.num_envs):
+                for k in range(1, self.cfg.grid_history_len):
+                    grid_obs[e, k] = self._warp_grid_to_current_frame(
+                        self.grid_history[e, k],
+                        self._pose_history[e, k, :2],
+                        self._pose_history[e, k, 2],
+                        robot_pos_w[e],
+                        robot_yaw[e] if robot_yaw.dim() == 1 else robot_yaw[e, 0],
+                    )
         if self.cfg.grid_normalize:
             grid_obs = torch.where(
                 grid_obs == self.cfg.grid_unknown_cost,

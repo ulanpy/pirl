@@ -4,7 +4,6 @@ import isaaclab.utils.math as math_utils
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-
 def define_markers() -> VisualizationMarkers:
     """Define markers for robot orientation and command direction."""
     marker_cfg = VisualizationMarkersCfg(

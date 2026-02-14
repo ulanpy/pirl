@@ -34,7 +34,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     if abs(abs(lidar_horizontal_fov_range[1] - lidar_horizontal_fov_range[0]) - 360.0) < 1e-6:
         lidar_num_rays -= 1
     # local costmap (Nav2-like defaults)
-    grid_size_m = 1.6  # rolling window size (meters)
+    grid_size_m = 9.0  # rolling window size (meters)
     grid_resolution = 0.05  # cell size (meters)
     grid_width_cells = int(round(grid_size_m / grid_resolution))  # grid width/height in cells
     grid_free_cost = 0.0  # Nav2 free space cost
@@ -43,7 +43,9 @@ class PirlEnvCfg(DirectRLEnvCfg):
     grid_unknown_cost = 255.0  # Nav2 unknown space cost
     grid_inflation_radius_m = 0.15  # inflation radius (meters)
     grid_cost_scaling_factor = 10.0  # inflation exponential decay factor
-    grid_history_len = 1  # number of stacked costmaps
+    grid_history_len = 4  # number of stacked costmaps (temporal context: CNN sees last K frames as channels)
+    # Push a new frame into history every N env steps so that K frames span ~1 s (at 60 env Hz: 4*15=60 steps)
+    grid_history_interval_steps = 15
     grid_normalize = True  # normalize costs for RL input
     # local path segment (Nav2-like: controller uses a local slice of the global path)
     path_num_points = 20  # total points in generated path
@@ -85,7 +87,12 @@ class PirlEnvCfg(DirectRLEnvCfg):
     lidar = MultiMeshRayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base_link",
         offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0225)),
-        mesh_prim_paths=["/World/envs/env_.*/Obstacle_.*"],
+        mesh_prim_paths=[
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/Obstacle_.*",
+                track_mesh_transforms=True,
+            ),
+        ],
         pattern_cfg=patterns.LidarPatternCfg(
             channels=1,
             vertical_fov_range=(0.0, 0.0),
@@ -108,7 +115,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
 
     # scene
     # Narrower spacing: 4.0m
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=50, env_spacing=4.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=True)
 
     # obstacles
     obstacle_cfg = sim_utils.CylinderCfg(
@@ -129,7 +136,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     track_width = 0.242  # m
     
     # reward scales
-    rew_scale_reverse = -0.8
+    rew_scale_reverse = -2.5
     rew_scale_standstill = -0.5
     standstill_speed_threshold = 0.05
     rew_scale_spin = 0.0
@@ -140,10 +147,15 @@ class PirlEnvCfg(DirectRLEnvCfg):
     rew_goal_bonus = 2.0
     # small per-step penalty (must stay much smaller than goal bonus)
     rew_step_penalty = -0.01
-    # collision penalty (applied on obstacle contact)
-    rew_scale_collision = -2.0
-    collision_robot_radius = 0.18
-    
+    # collision penalty (geometric: robot center vs obstacle centers)
+    rew_scale_collision = -5.0
+    collision_robot_radius = 0.18  # m, for geometric collision (circle overlap in XY)
+
     # Custom params
     num_obstacles = 6
-    obstacle_radius_range = (1.2, 2.0) # Adjusted for 4m spacing
+    obstacle_radius_range = (1.2, 2.0)  # Adjusted for 4m spacing
+    # Robot spawn: random XY in disk of this radius from env origin (inside obstacle ring)
+    robot_spawn_radius = 0.5
+    # Obstacles move at this speed (m/s); random direction per obstacle per env, bounce at boundary
+    obstacle_speed = 1.0
+    obstacle_boundary_radius = 2.2  # bounce when distance from env origin exceeds this

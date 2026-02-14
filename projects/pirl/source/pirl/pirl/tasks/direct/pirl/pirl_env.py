@@ -8,12 +8,11 @@ import math
 
 import isaaclab.sim as sim_utils
 import torch
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.sensors import MultiMeshRayCaster
 import isaaclab.utils.math as math_utils
-from isaaclab.sim import XformPrimView
 
 from .pirl_env_cfg import PirlEnvCfg
 from .pirl_env_costmap import LocalCostmapBuilder
@@ -35,16 +34,16 @@ class PirlEnv(DirectRLEnv):
         self.prev_path_idx = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
         self.up_dir = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(self.num_envs, 1)
         self.marker_offset = torch.tensor([0.0, 0.0, 0.5], device=self.device).repeat(self.num_envs, 1)
-        
+
         # Local grid buffers (Nav2-like costmap)
         self.costmap = LocalCostmapBuilder(self.cfg, self.device, self.num_envs)
 
         # Local path buffers
         self.path_manager = LocalPathManager(self.cfg, self.device, self.num_envs)
         
-        # Obstacle movement state
-        self.obstacle_time = torch.zeros(self.num_envs, device=self.device)
+        # Obstacle state: position offset from env origin (XY), and velocity (XY) for moving at obstacle_speed
         self.obstacle_initial_pos = [torch.zeros((self.num_envs, 3), device=self.device) for _ in range(self.cfg.num_obstacles)]
+        self.obstacle_velocity = [torch.zeros((self.num_envs, 3), device=self.device) for _ in range(self.cfg.num_obstacles)]
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
@@ -57,39 +56,33 @@ class PirlEnv(DirectRLEnv):
             )
         )
         spawn_ground_plane(prim_path="/World/ground", cfg=ground_cfg)
-        
-        # Add obstacles at initial spread positions to avoid "cage" at (0,0)
-        for i in range(self.cfg.num_obstacles):
-            angle = i * (2 * math.pi / self.cfg.num_obstacles)
-            dist = 2.0
-            x = dist * math.cos(angle)
-            y = dist * math.sin(angle)
-            self.cfg.obstacle_cfg.func(
-                f"/World/envs/env_.*/Obstacle_{i}", 
-                self.cfg.obstacle_cfg, 
-                translation=(x, y, 0.25)
-            )
 
-        # clone and replicate
+        # clone and replicate (envs must exist before we spawn obstacles as RigidObject)
         self.scene.clone_environments(copy_from_source=False)
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot
-        
-        # Initialize views for obstacles
-        self.obstacle_views = []
+
+        # Obstacles as RigidObject so we can write_root_pose_to_sim each step (PhysX uses this; XformPrimView does not)
+        self.obstacle_objects = []
         for i in range(self.cfg.num_obstacles):
-            view = XformPrimView(f"/World/envs/env_.*/Obstacle_{i}")
-            self.obstacle_views.append(view)
+            obs_cfg = RigidObjectCfg(
+                prim_path=f"/World/envs/env_.*/Obstacle_{i}",
+                spawn=self.cfg.obstacle_cfg,
+                init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.25)),
+            )
+            obj = RigidObject(cfg=obs_cfg)
+            self.obstacle_objects.append(obj)
+            if hasattr(self.scene, "rigid_objects"):
+                self.scene.rigid_objects[f"obstacle_{i}"] = obj
         
         # Initialize sensors
         self.lidar = MultiMeshRayCaster(self.cfg.lidar)
-
         self.scene.sensors["lidar"] = self.lidar
-        
+
         # Initialize markers
         self.visualization_markers = define_markers()
         self.path_markers = define_path_markers()
-        
+
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -101,19 +94,43 @@ class PirlEnv(DirectRLEnv):
         self._visualize_markers()
 
     def _move_obstacles(self):
-        """Move some obstacles in an oscillating pattern."""
-        self.obstacle_time += self.cfg.sim.dt * self.cfg.decimation
-        
-        # Move obstacles 0 and 1
-        for i in [0, 1]:
-            offset_y = torch.sin(self.obstacle_time * 2.0) * 0.8
-            
-            current_pos = self.scene.env_origins.clone()
-            current_pos[:, 0] += self.obstacle_initial_pos[i][:, 0]
-            current_pos[:, 1] += self.obstacle_initial_pos[i][:, 1] + offset_y
-            current_pos[:, 2] = 0.25
-            
-            self.obstacle_views[i].set_world_poses(current_pos, torch.tensor([1, 0, 0, 0], device=self.device).repeat(self.num_envs, 1))
+        """Move all obstacles at obstacle_speed (m/s); bounce off boundary. Use write_root_pose_to_sim for PhysX."""
+        dt = self.cfg.sim.dt * self.cfg.decimation
+        R = self.cfg.obstacle_boundary_radius
+        quat_wxyz = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+        for i in range(self.cfg.num_obstacles):
+            # Advance position (XY only)
+            self.obstacle_initial_pos[i][:, 0] += self.obstacle_velocity[i][:, 0] * dt
+            self.obstacle_initial_pos[i][:, 1] += self.obstacle_velocity[i][:, 1] * dt
+            # Bounce off boundary
+            dist = torch.linalg.norm(self.obstacle_initial_pos[i][:, :2], dim=-1)
+            over = dist > R
+            if torch.any(over):
+                xy = self.obstacle_initial_pos[i][:, :2]
+                n = xy / (dist.unsqueeze(-1).clamp(min=1e-6))
+                v = self.obstacle_velocity[i][:, :2]
+                self.obstacle_velocity[i][:, :2] = torch.where(
+                    over.unsqueeze(-1),
+                    v - 2 * (v * n).sum(dim=-1, keepdim=True) * n,
+                    v,
+                )
+                scale = R / dist.clamp(min=1e-6)
+                self.obstacle_initial_pos[i][:, :2] = torch.where(
+                    over.unsqueeze(-1),
+                    xy * scale.unsqueeze(-1),
+                    xy,
+                )
+            # World position (world frame)
+            world_pos = self.scene.env_origins.clone()
+            world_pos[:, 0] += self.obstacle_initial_pos[i][:, 0]
+            world_pos[:, 1] += self.obstacle_initial_pos[i][:, 1]
+            world_pos[:, 2] = 0.25
+            # Pose (pos + quat wxyz) for PhysX
+            root_pose = torch.cat([world_pos, quat_wxyz], dim=-1)
+            self.obstacle_objects[i].write_root_pose_to_sim(root_pose)
+            self.obstacle_objects[i].write_root_velocity_to_sim(
+                torch.zeros(self.num_envs, 6, device=self.device)
+            )
 
     def _visualize_markers(self):
         visualize_markers(
@@ -176,7 +193,8 @@ class PirlEnv(DirectRLEnv):
         lidar_ranges = torch.clamp(lidar_ranges, max=self.cfg.lidar.max_distance)
         lidar_ranges_m = lidar_ranges
 
-        grid_obs = self.costmap.build_image(lidar_ranges_m)
+        robot_yaw = torch.atan2(self.forwards[:, 1], self.forwards[:, 0])
+        grid_obs = self.costmap.build_image(lidar_ranges_m, robot_pos_w, robot_yaw)
 
         # Local path segment in robot frame
         path_obs = self.path_manager.get_segment(robot_pos_w, self.robot.data.root_quat_w, curr_idx)
@@ -208,14 +226,14 @@ class PirlEnv(DirectRLEnv):
         return die, time_out
 
     def _compute_collision_mask(self) -> torch.Tensor:
-        """Return [num_envs, 1] bool collision mask using XY overlap with obstacle cylinders."""
-        robot_pos_xy = self.robot.data.root_pos_w[:, :2]
-        collision_distance = self.cfg.collision_robot_radius + self.cfg.obstacle_cfg.radius
+        """Return [num_envs, 1] bool: geometric collision (robot center vs obstacle centers in own env)."""
+        robot_xy = self.robot.data.root_pos_w[:, :2]
+        collision_dist = self.cfg.collision_robot_radius + self.cfg.obstacle_cfg.radius
         has_collision = torch.zeros((self.num_envs, 1), dtype=torch.bool, device=self.device)
         for i in range(self.cfg.num_obstacles):
-            obstacle_pos_xy = self.scene.env_origins[:, :2] + self.obstacle_initial_pos[i][:, :2]
-            dist = torch.linalg.norm(robot_pos_xy - obstacle_pos_xy, dim=-1, keepdim=True)
-            has_collision |= dist <= collision_distance
+            obs_xy = self.scene.env_origins[:, :2] + self.obstacle_initial_pos[i][:, :2]
+            dist = torch.linalg.norm(robot_xy - obs_xy, dim=-1, keepdim=True)
+            has_collision |= dist <= collision_dist
         return has_collision
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -223,26 +241,38 @@ class PirlEnv(DirectRLEnv):
             env_ids = self.robot._ALL_INDICES
         super()._reset_idx(env_ids)
 
-        # Randomize obstacle positions on reset
+        # Randomize obstacle positions and velocities on reset
+        speed = self.cfg.obstacle_speed
         for i in range(self.cfg.num_obstacles):
             rand_angles = torch.rand(len(env_ids), device=self.device) * 2 * math.pi
             rand_dists = torch.rand(len(env_ids), device=self.device) * (self.cfg.obstacle_radius_range[1] - self.cfg.obstacle_radius_range[0]) + self.cfg.obstacle_radius_range[0]
-            
             self.obstacle_initial_pos[i][env_ids, 0] = rand_dists * torch.cos(rand_angles)
             self.obstacle_initial_pos[i][env_ids, 1] = rand_dists * torch.sin(rand_angles)
             self.obstacle_initial_pos[i][env_ids, 2] = 0.25
-            
-            world_pos = self.scene.env_origins[env_ids].clone()
-            world_pos[:, 0] += self.obstacle_initial_pos[i][env_ids, 0]
-            world_pos[:, 1] += self.obstacle_initial_pos[i][env_ids, 1]
+            vel_angles = torch.rand(len(env_ids), device=self.device) * 2 * math.pi
+            self.obstacle_velocity[i][env_ids, 0] = speed * torch.cos(vel_angles)
+            self.obstacle_velocity[i][env_ids, 1] = speed * torch.sin(vel_angles)
+            self.obstacle_velocity[i][env_ids, 2] = 0.0
+        # Push all obstacle poses to PhysX (so reset envs get new positions)
+        quat_wxyz = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+        for i in range(self.cfg.num_obstacles):
+            world_pos = self.scene.env_origins.clone()
+            world_pos[:, 0] += self.obstacle_initial_pos[i][:, 0]
+            world_pos[:, 1] += self.obstacle_initial_pos[i][:, 1]
             world_pos[:, 2] = 0.25
-            self.obstacle_views[i].set_world_poses(world_pos, torch.tensor([1, 0, 0, 0], device=self.device).repeat(len(env_ids), 1), env_ids)
+            root_pose = torch.cat([world_pos, quat_wxyz], dim=-1)
+            self.obstacle_objects[i].write_root_pose_to_sim(root_pose)
+            self.obstacle_objects[i].write_root_velocity_to_sim(
+                torch.zeros(self.num_envs, 6, device=self.device)
+            )
 
-        self.obstacle_time[env_ids] = 0.0
-
-        # Reset robot state
+        # Reset robot state: random XY spawn inside disk of robot_spawn_radius
         root_state = self.robot.data.default_root_state[env_ids].clone()
         root_state[:, :3] += self.scene.env_origins[env_ids]
+        spawn_r = self.cfg.robot_spawn_radius * torch.sqrt(torch.rand(len(env_ids), device=self.device))
+        spawn_theta = torch.rand(len(env_ids), device=self.device) * 2 * math.pi
+        root_state[:, 0] += spawn_r * torch.cos(spawn_theta)
+        root_state[:, 1] += spawn_r * torch.sin(spawn_theta)
         root_state[:, 2] += 0.06
         self.robot.write_root_state_to_sim(root_state, env_ids)
         
