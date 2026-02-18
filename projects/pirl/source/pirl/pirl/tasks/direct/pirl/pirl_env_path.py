@@ -17,12 +17,30 @@ class LocalPathManager:
     def reset(self, env_ids, env_origins: torch.Tensor) -> None:
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
-        rand_angles = torch.rand((len(env_ids), self.cfg.path_num_points), device=self.device) * 2 * math.pi
-        rand_dists = torch.rand((len(env_ids), self.cfg.path_num_points), device=self.device) * (
-            self.cfg.path_radius_range[1] - self.cfg.path_radius_range[0]
-        ) + self.cfg.path_radius_range[0]
-        path_x = rand_dists * torch.cos(rand_angles)
-        path_y = rand_dists * torch.sin(rand_angles)
+        n = len(env_ids)
+        k = self.cfg.path_num_points
+        r_min, r_max = self.cfg.path_radius_range
+
+        # Generate a smooth polyline in polar coordinates (instead of an unordered point cloud).
+        angle_range = getattr(self.cfg, "path_angle_range", None)
+        if angle_range is not None:
+            a0, a1 = angle_range
+            base_heading = torch.rand((n, 1), device=self.device) * (a1 - a0) + a0
+        else:
+            base_heading = torch.rand((n, 1), device=self.device) * 2 * math.pi
+
+        # Small cumulative heading perturbations keep local curvature bounded.
+        heading_step_noise = (torch.rand((n, k), device=self.device) - 0.5) * 0.12
+        headings = base_heading + torch.cumsum(heading_step_noise, dim=1)
+
+        # Radial distance increases along path index to create forward progression.
+        radial_template = torch.linspace(r_min, r_max, k, device=self.device).unsqueeze(0).repeat(n, 1)
+        radial_noise = (torch.rand((n, k), device=self.device) - 0.5) * 0.06
+        radial = torch.clamp(radial_template + radial_noise, min=r_min, max=r_max)
+        radial = torch.cummax(radial, dim=1).values
+
+        path_x = radial * torch.cos(headings)
+        path_y = radial * torch.sin(headings)
         self.path_points_w[env_ids] = torch.stack((path_x, path_y), dim=-1) + env_origins.unsqueeze(1)
         self.path_idx[env_ids] = 0
 

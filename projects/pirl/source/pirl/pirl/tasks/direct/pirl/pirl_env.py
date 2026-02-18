@@ -175,8 +175,10 @@ class PirlEnv(DirectRLEnv):
         dot = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
         # Cross product (z-component): turn direction
         cross = (self.forwards[:, 0] * self.commands[:, 1] - self.forwards[:, 1] * self.commands[:, 0]).unsqueeze(-1)
-        # Forward speed in body frame
+        # Ego-motion in body frame
         forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
+        lateral_speed = self.robot.data.root_com_lin_vel_b[:, 1].unsqueeze(-1)
+        yaw_rate = self.robot.data.root_com_ang_vel_b[:, 2].unsqueeze(-1)
 
         # Lidar ranges normalized to [0, 1]
         # MultiMeshRayCaster stores hit positions; compute distances from ray starts
@@ -199,7 +201,7 @@ class PirlEnv(DirectRLEnv):
         # Local path segment in robot frame
         path_obs = self.path_manager.get_segment(robot_pos_w, self.robot.data.root_quat_w, curr_idx)
 
-        vec_obs = torch.hstack((dot, cross, forward_speed, path_obs))
+        vec_obs = torch.hstack((dot, cross, forward_speed, lateral_speed, yaw_rate, path_obs))
         return {"policy": {"vec": vec_obs, "costmap": grid_obs}}
 
     def _get_rewards(self) -> torch.Tensor:
@@ -211,9 +213,18 @@ class PirlEnv(DirectRLEnv):
         reward += reached_goal.unsqueeze(-1).float() * self.cfg.rew_goal_bonus
         self.prev_path_idx = self.path_manager.path_idx.clone()
 
-        # penalize only actual obstacle contact (collision in XY)
+        # Keep reward and termination consistent: penalize any geometric collision.
         has_collision = self._compute_collision_mask()
         reward += has_collision.float() * self.cfg.rew_scale_collision
+        # Penalize true standstill only: low forward speed AND low yaw rate.
+        # This avoids discouraging in-place turning, which is essential for obstacle avoidance.
+        forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
+        yaw_rate = torch.abs(self.robot.data.root_com_ang_vel_b[:, 2].unsqueeze(-1))
+        abs_speed = torch.abs(forward_speed)
+        standstill = (abs_speed < self.cfg.standstill_speed_threshold) & (
+            yaw_rate < self.cfg.spin_rate_threshold
+        )
+        reward += standstill.float() * self.cfg.rew_scale_standstill
         # small time penalty to encourage faster completion
         reward += self.cfg.rew_step_penalty
         return reward
@@ -241,10 +252,15 @@ class PirlEnv(DirectRLEnv):
             env_ids = self.robot._ALL_INDICES
         super()._reset_idx(env_ids)
 
-        # Randomize obstacle positions and velocities on reset
+        # Randomize obstacle positions and velocities on reset (optionally only in "front" sector)
         speed = self.cfg.obstacle_speed
+        obs_angle_range = getattr(self.cfg, "obstacle_angle_range", None)
         for i in range(self.cfg.num_obstacles):
-            rand_angles = torch.rand(len(env_ids), device=self.device) * 2 * math.pi
+            if obs_angle_range is not None:
+                a0, a1 = obs_angle_range
+                rand_angles = torch.rand(len(env_ids), device=self.device) * (a1 - a0) + a0
+            else:
+                rand_angles = torch.rand(len(env_ids), device=self.device) * 2 * math.pi
             rand_dists = torch.rand(len(env_ids), device=self.device) * (self.cfg.obstacle_radius_range[1] - self.cfg.obstacle_radius_range[0]) + self.cfg.obstacle_radius_range[0]
             self.obstacle_initial_pos[i][env_ids, 0] = rand_dists * torch.cos(rand_angles)
             self.obstacle_initial_pos[i][env_ids, 1] = rand_dists * torch.sin(rand_angles)
@@ -266,14 +282,27 @@ class PirlEnv(DirectRLEnv):
                 torch.zeros(self.num_envs, 6, device=self.device)
             )
 
-        # Reset robot state: random XY spawn inside disk of robot_spawn_radius
+        # Reset robot state: random XY in disk of robot_spawn_radius, optionally in a "start zone" sector
         root_state = self.robot.data.default_root_state[env_ids].clone()
         root_state[:, :3] += self.scene.env_origins[env_ids]
         spawn_r = self.cfg.robot_spawn_radius * torch.sqrt(torch.rand(len(env_ids), device=self.device))
-        spawn_theta = torch.rand(len(env_ids), device=self.device) * 2 * math.pi
+        spawn_angle_range = getattr(self.cfg, "spawn_angle_range", None)
+        if spawn_angle_range is not None:
+            a0, a1 = spawn_angle_range
+            spawn_theta = torch.rand(len(env_ids), device=self.device) * (a1 - a0) + a0
+        else:
+            spawn_theta = torch.rand(len(env_ids), device=self.device) * 2 * math.pi
         root_state[:, 0] += spawn_r * torch.cos(spawn_theta)
         root_state[:, 1] += spawn_r * torch.sin(spawn_theta)
         root_state[:, 2] += 0.06
+        # When using a start zone, face robot toward arena (origin) so path is ahead
+        if spawn_angle_range is not None:
+            yaw = spawn_theta + math.pi
+            half = 0.5 * yaw
+            root_state[:, 3] = torch.cos(half)
+            root_state[:, 4] = 0.0
+            root_state[:, 5] = 0.0
+            root_state[:, 6] = torch.sin(half)
         self.robot.write_root_state_to_sim(root_state, env_ids)
         
         # Reset sensors

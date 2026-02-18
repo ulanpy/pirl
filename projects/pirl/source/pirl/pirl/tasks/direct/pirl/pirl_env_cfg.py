@@ -34,7 +34,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     if abs(abs(lidar_horizontal_fov_range[1] - lidar_horizontal_fov_range[0]) - 360.0) < 1e-6:
         lidar_num_rays -= 1
     # local costmap (Nav2-like defaults)
-    grid_size_m = 9.0  # rolling window size (meters)
+    grid_size_m = 5.0  # rolling window size (meters)
     grid_resolution = 0.05  # cell size (meters)
     grid_width_cells = int(round(grid_size_m / grid_resolution))  # grid width/height in cells
     grid_free_cost = 0.0  # Nav2 free space cost
@@ -48,16 +48,17 @@ class PirlEnvCfg(DirectRLEnvCfg):
     grid_history_interval_steps = 15
     grid_normalize = True  # normalize costs for RL input
     # local path segment (Nav2-like: controller uses a local slice of the global path)
-    path_num_points = 20  # total points in generated path
+    # Fewer points spaced ~2 m apart so waypoint bonus is rarer and robot does not abuse it over obstacle avoidance.
+    path_num_points = 4  # waypoints along path (spaced ~2 m)
     path_segment_len = 1  # points provided to policy
-    path_radius_range = (0.6, 2.0)  # path points distance from env origin (meters)
-    path_goal_threshold = 0.25  # distance to advance to next path point (meters)
+    path_radius_range = (0.6, 6.0)  # path from 0.6 m to 6 m from env origin → ~2 m between consecutive waypoints
+    path_goal_threshold = 0.4  # distance to count waypoint as reached (slightly larger for 2 m spacing)
     observation_space = gym.spaces.Dict(
         {
             "vec": gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(3 + (path_segment_len * 2),),
+                shape=(5 + (path_segment_len * 2),),
                 dtype=np.float32,
             ),
             "costmap": gym.spaces.Box(
@@ -114,8 +115,8 @@ class PirlEnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    # Narrower spacing: 4.0m
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=True)
+    # Keep envs far enough to avoid cross-env obstacle leakage into local costmaps.
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=50, env_spacing=6.0, replicate_physics=True)
 
     # obstacles
     obstacle_cfg = sim_utils.CylinderCfg(
@@ -136,26 +137,33 @@ class PirlEnvCfg(DirectRLEnvCfg):
     track_width = 0.242  # m
     
     # reward scales
-    rew_scale_reverse = -2.5
-    rew_scale_standstill = -0.5
+    rew_scale_standstill = 0
     standstill_speed_threshold = 0.05
-    rew_scale_spin = 0.0
     spin_rate_threshold = 0.5
     # reward progress toward current path point
-    rew_scale_progress = 1.0
+    rew_scale_progress = 10.0
     # one-time bonus when reaching each path point
-    rew_goal_bonus = 2.0
+    rew_goal_bonus = 10.0
     # small per-step penalty (must stay much smaller than goal bonus)
     rew_step_penalty = -0.01
     # collision penalty (geometric: robot center vs obstacle centers)
-    rew_scale_collision = -5.0
+    rew_scale_collision = -2.0
     collision_robot_radius = 0.18  # m, for geometric collision (circle overlap in XY)
 
     # Custom params
-    num_obstacles = 6
+    num_obstacles = 5
     obstacle_radius_range = (1.2, 2.0)  # Adjusted for 4m spacing
     # Robot spawn: random XY in disk of this radius from env origin (inside obstacle ring)
     robot_spawn_radius = 0.5
     # Obstacles move at this speed (m/s); random direction per obstacle per env, bounce at boundary
     obstacle_speed = 1.0
     obstacle_boundary_radius = 2.2  # bounce when distance from env origin exceeds this
+
+    # Typical local avoidance scenario: robot in "start zone", path and obstacles ahead (like real deployment).
+    # Angles in radians; 0 = +X, pi/2 = +Y. Set all three to None to restore old "spawn in chaos" behavior.
+    # Spawn sector: back half so robot is not dropped in the middle of dynamics.
+    spawn_angle_range: tuple[float, float] | None = (math.pi * 0.5, math.pi * 1.5)
+    # Path points sector: e.g. (-pi/2, pi/2) = front half so path is ahead of spawn.
+    path_angle_range: tuple[float, float] | None = (-math.pi * 0.5, math.pi * 0.5)
+    # Obstacles sector: e.g. (-pi/3, pi/3) = front cone so dynamics are ahead, not behind.
+    obstacle_angle_range: tuple[float, float] | None = (-math.pi / 3.0, math.pi / 3.0)
