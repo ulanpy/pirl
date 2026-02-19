@@ -77,6 +77,7 @@ simulation_app = app_launcher.app
 import os
 import random
 import time
+import copy
 
 import gymnasium as gym
 import skrl
@@ -114,6 +115,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import pirl.tasks  # noqa: F401
+from pirl.tasks.direct.pirl.agents.runner_utils import get_runner
 
 # config shortcuts
 if args_cli.agent is None:
@@ -202,7 +204,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     experiment_cfg["trainer"]["close_environment_at_exit"] = False
     experiment_cfg["agent"]["experiment"]["write_interval"] = 0  # don't log to TensorBoard
     experiment_cfg["agent"]["experiment"]["checkpoint_interval"] = 0  # don't generate checkpoints
-    runner = Runner(env, experiment_cfg)
+    runner = get_runner(env, experiment_cfg, args_cli.ml_framework)
 
     print(f"[INFO] Loading model checkpoint from: {resume_path}")
     runner.agent.load(resume_path)

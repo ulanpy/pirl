@@ -2,3 +2,5 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
+
+from .ppo_dynamics_aux import PPODynamicsAux, PPODynamicsAux_default_config

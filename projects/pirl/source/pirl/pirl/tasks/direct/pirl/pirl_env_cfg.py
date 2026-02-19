@@ -147,7 +147,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # small per-step penalty (must stay much smaller than goal bonus)
     rew_step_penalty = -0.01
     # collision penalty (geometric: robot center vs obstacle centers)
-    rew_scale_collision = -2.0
+    rew_scale_collision = -10.0
     collision_robot_radius = 0.18  # m, for geometric collision (circle overlap in XY)
 
     # Custom params

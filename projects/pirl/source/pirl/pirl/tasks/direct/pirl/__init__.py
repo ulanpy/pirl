@@ -13,11 +13,13 @@ from . import agents
 
 
 gym.register(
-    id="Template-Pirl-Direct-v0",
+    id="jettank",
     entry_point=f"{__name__}.pirl_env:PirlEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.pirl_env_cfg:PirlEnvCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "skrl_ppo_aux_cfg_entry_point": f"{agents.__name__}:skrl_ppo_aux_cfg.yaml",
+
     },
 )

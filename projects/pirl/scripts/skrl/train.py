@@ -78,6 +78,7 @@ import logging
 import os
 import random
 import time
+import copy
 from datetime import datetime
 
 import gymnasium as gym
@@ -118,6 +119,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 logger = logging.getLogger(__name__)
 
 import pirl.tasks  # noqa: F401
+from pirl.tasks.direct.pirl.agents.runner_utils import get_runner
 
 # config shortcuts
 if args_cli.agent is None:
@@ -223,7 +225,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # configure and instantiate the skrl runner
     # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
-    runner = Runner(env, agent_cfg)
+    runner = get_runner(env, agent_cfg, args_cli.ml_framework)
 
     # load checkpoint (if specified)
     if resume_path:
