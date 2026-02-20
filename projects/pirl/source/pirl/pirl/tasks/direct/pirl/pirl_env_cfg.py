@@ -82,7 +82,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     robot_cfg: ArticulationCfg = JETTANK_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
     )
-    robot_cfg.init_state.pos = (0.0, 0.0, 0.06) 
+    robot_cfg.init_state.pos = (0.0, 0.0, 0.03) 
     
     # sensors
     lidar = MultiMeshRayCasterCfg(
@@ -156,7 +156,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Robot spawn: random XY in disk of this radius from env origin (inside obstacle ring)
     robot_spawn_radius = 0.5
     # Obstacles move at this speed (m/s); random direction per obstacle per env, bounce at boundary
-    obstacle_speed = 1.0
+    obstacle_speed = 0.5
     obstacle_boundary_radius = 2.2  # bounce when distance from env origin exceeds this
 
     # Typical local avoidance scenario: robot in "start zone", path and obstacles ahead (like real deployment).

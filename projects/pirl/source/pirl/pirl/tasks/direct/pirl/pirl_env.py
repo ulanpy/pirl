@@ -294,7 +294,6 @@ class PirlEnv(DirectRLEnv):
             spawn_theta = torch.rand(len(env_ids), device=self.device) * 2 * math.pi
         root_state[:, 0] += spawn_r * torch.cos(spawn_theta)
         root_state[:, 1] += spawn_r * torch.sin(spawn_theta)
-        root_state[:, 2] += 0.06
         # When using a start zone, face robot toward arena (origin) so path is ahead
         if spawn_angle_range is not None:
             yaw = spawn_theta + math.pi

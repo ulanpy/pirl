@@ -143,24 +143,17 @@
       <mass value="0.1"/>
       <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
     </inertial>
-    <visual>
-      <origin rpy="1.570796 0 0" xyz="0 0 0"/>
-      <geometry>
-        <cylinder length="0.04" radius="0.05"/>
-      </geometry>
-      <material name="black"/>
-    </visual>
     <collision>
       <origin rpy="1.570796 0 0" xyz="0 0 0"/>
       <geometry>
-        <cylinder length="0.04" radius="0.05"/>
+        <cylinder length="0.04" radius="0.03"/>
       </geometry>
     </collision>
   </link>
   <joint name="left_wheel_joint" type="continuous">
     <parent link="base_link"/>
     <child link="left_wheel"/>
-    <origin rpy="0 0 0" xyz="-0.06 0.08 -0.02"/>
+    <origin rpy="0 0 0" xyz="-0.06 0.121 0.01"/>
     <axis xyz="0 1 0"/>
   </joint>
 
@@ -170,31 +163,24 @@
       <mass value="0.1"/>
       <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
     </inertial>
-    <visual>
-      <origin rpy="1.570796 0 0" xyz="0 0 0"/>
-      <geometry>
-        <cylinder length="0.04" radius="0.05"/>
-      </geometry>
-      <material name="black"/>
-    </visual>
     <collision>
       <origin rpy="1.570796 0 0" xyz="0 0 0"/>
       <geometry>
-        <cylinder length="0.04" radius="0.05"/>
+        <cylinder length="0.04" radius="0.03"/>
       </geometry>
     </collision>
   </link>
   <joint name="right_wheel_joint" type="continuous">
     <parent link="base_link"/>
     <child link="right_wheel"/>
-    <origin rpy="0 0 0" xyz="-0.06 -0.08 -0.02"/>
+    <origin rpy="0 0 0" xyz="-0.06 -0.121 0.01"/>
     <axis xyz="0 1 0"/>
   </joint>
 
   <!-- Front skid (collision-only support to prevent nose diving) -->
   <link name="front_skid">
     <collision>
-      <origin rpy="0 0 0" xyz="0.12 0 -0.045"/>
+      <origin rpy="0 0 0" xyz="0.12 0 0.0"/>
       <geometry>
         <box size="0.10 0.10 0.02"/>
       </geometry>
@@ -207,46 +193,4 @@
     <axis xyz="0 0 0"/>
   </joint>
 
-  <!-- Passive rollers (approximation) -->
-
-  <link name="left_roller_rear">
-    <inertial>
-      <mass value="0.05"/>
-      <inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00005"/>
-    </inertial>
-    <visual>
-      <origin rpy="1.570796 0 0" xyz="0 0 0"/>
-      <geometry>
-        <cylinder length="0.04" radius="0.03"/>
-      </geometry>
-      <material name="black"/>
-    </visual>
-  </link>
-  <joint name="left_roller_rear_joint" type="continuous">
-    <parent link="base_link"/>
-    <child link="left_roller_rear"/>
-    <origin rpy="0 0 0" xyz="-0.14 0.08 -0.03"/>
-    <axis xyz="0 1 0"/>
-  </joint>
-
-
-  <link name="right_roller_rear">
-    <inertial>
-      <mass value="0.05"/>
-      <inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00005"/>
-    </inertial>
-    <visual>
-      <origin rpy="1.570796 0 0" xyz="0 0 0"/>
-      <geometry>
-        <cylinder length="0.04" radius="0.03"/>
-      </geometry>
-      <material name="black"/>
-    </visual>
-  </link>
-  <joint name="right_roller_rear_joint" type="continuous">
-    <parent link="base_link"/>
-    <child link="right_roller_rear"/>
-    <origin rpy="0 0 0" xyz="-0.14 -0.08 -0.03"/>
-    <axis xyz="0 1 0"/>
-  </joint>
 </robot>
