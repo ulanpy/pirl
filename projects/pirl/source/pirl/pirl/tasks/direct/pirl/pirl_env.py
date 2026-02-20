@@ -44,7 +44,7 @@ class PirlEnv(DirectRLEnv):
         self.path_manager = LocalPathManager(self.cfg, self.device, self.num_envs)
         self._latest_lidar_ranges_m = None
         self.proximity = ProximityReward(self.cfg, self.device, self.num_envs)
-
+        self.extras = {} 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         # add ground plane with explicit friction
@@ -82,9 +82,6 @@ class PirlEnv(DirectRLEnv):
         self.actions = torch.clamp(actions, -1.0, 1.0).clone()
         dt = self.cfg.sim.dt * self.cfg.decimation
         self.obstacle_manager.move(dt, self.scene.env_origins)
-        self._visualize_markers()
-
-    def _visualize_markers(self):
         visualize_markers(
             self.visualization_markers,
             self.path_markers,
@@ -158,27 +155,52 @@ class PirlEnv(DirectRLEnv):
         return {"policy": {"vec": vec_obs, "costmap": grid_obs}}
 
     def _get_rewards(self) -> torch.Tensor:
-        progress = self.prev_target_dist - self.curr_target_dist
-        self.prev_target_dist = self.curr_target_dist
-        reward = progress * self.cfg.rew_scale_progress
-        reward += self.proximity.compute_penalty(self._latest_lidar_ranges_m)
-        # bonus when a path goal point is reached (index advanced)
-        reached_goal = self.path_manager.path_idx > self.prev_path_idx
-        reward += reached_goal.unsqueeze(-1).float() * self.cfg.rew_goal_bonus
-        self.prev_path_idx = self.path_manager.path_idx.clone()
+            # 1. Вычисляем отдельные компоненты
+            # Прогресс к цели
+            progress_val = (self.prev_target_dist - self.curr_target_dist) * self.cfg.rew_scale_progress
+            
+            # Штраф за близость (proximity)
+            proximity_val = self.proximity.compute_penalty(self._latest_lidar_ranges_m)
+            
+            # Бонус за достижение точки пути
+            reached_goal = self.path_manager.path_idx > self.prev_path_idx
+            goal_bonus_val = reached_goal.unsqueeze(dim=-1).float() * self.cfg.rew_goal_bonus
+            
+            # Коллизии
+            robot_xy = self.robot.data.root_pos_w[:, :2]
+            has_collision = self.obstacle_manager.collision_mask(robot_xy, self.scene.env_origins)
+            collision_val = has_collision.float() * self.cfg.rew_scale_collision
+            
+            # Скорость и реверс
+            forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
+            reverse_val = torch.zeros_like(forward_speed)
+            if self.cfg.rew_scale_reverse != 0:
+                reverse_val = float(self.cfg.rew_scale_reverse) * torch.clamp(-forward_speed, min=0.0)
+                
+            # Постоянный штраф за время
+            step_penalty_val = torch.full_like(forward_speed, self.cfg.rew_step_penalty)
 
-        # Keep reward and termination consistent: penalize any geometric collision.
-        robot_xy = self.robot.data.root_pos_w[:, :2]
-        has_collision = self.obstacle_manager.collision_mask(robot_xy, self.scene.env_origins)
-        reward += has_collision.float() * self.cfg.rew_scale_collision
-        # Penalize true standstill only: low forward speed AND low yaw rate.
-        # This avoids discouraging in-place turning, which is essential for obstacle avoidance.
-        forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
-        if self.cfg.rew_scale_reverse != 0:
-            reward += float(self.cfg.rew_scale_reverse) * torch.clamp(-forward_speed, min=0.0)
-        # small time penalty to encourage faster completion
-        reward += self.cfg.rew_step_penalty
-        return reward
+            # 2. Итоговая награда
+            reward = progress_val + proximity_val + goal_bonus_val + collision_val + reverse_val + step_penalty_val
+
+            # 3. Обновляем буферы состояния
+            self.prev_target_dist = self.curr_target_dist
+            self.prev_path_idx = self.path_manager.path_idx.clone()
+
+            # 4. Reward Breakdown для логирования (TensorBoard/WandB)
+            # Мы используем .mean(), чтобы получить среднее значение по всем параллельным средам
+            if "log" not in self.extras:
+                self.extras["log"] = {}
+            
+            self.extras["log"]["rew/progress"] = torch.mean(progress_val)
+            self.extras["log"]["rew/proximity"] = torch.mean(proximity_val)
+            self.extras["log"]["rew/goal_bonus"] = torch.mean(goal_bonus_val)
+            self.extras["log"]["rew/collision"] = torch.mean(collision_val)
+            self.extras["log"]["rew/reverse"] = torch.mean(reverse_val)
+            self.extras["log"]["rew/step_penalty"] = torch.mean(step_penalty_val)
+            self.extras["log"]["rew/total"] = torch.mean(reward)
+
+            return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1

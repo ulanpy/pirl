@@ -145,7 +145,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # one-time bonus when reaching each path point
     rew_goal_bonus = 10.0
     # small per-step penalty (must stay much smaller than goal bonus)
-    rew_step_penalty = -0.01
+    rew_step_penalty = -0.005
     # collision penalty (geometric: robot center vs obstacle centers)
     rew_scale_collision = -5.0
     collision_robot_radius = 0.18  # m, for geometric collision (circle overlap in XY)
@@ -153,11 +153,11 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Penalty activates when nearest obstacle in front sector is closer than this distance.
     proximity_activation_distance = 0.8  # m
     # Larger value -> steeper growth as obstacle gets closer.
-    proximity_exponential_rate = 3.0
+    proximity_exponential_rate = 1.5
     # Front sector used for proximity penalty to avoid over-penalizing blind rear space.
     proximity_front_fov_deg = 140.0
     # Absolute cap for proximity penalty magnitude (runtime also clamps to < |collision penalty|).
-    rew_proximity_max_penalty = 8.0
+    rew_proximity_max_penalty = 4.0
     # Optional anti-reverse shaping (0 disables). Applies as: scale * relu(-forward_speed).
     rew_scale_reverse = -0.2
 
