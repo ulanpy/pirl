@@ -41,8 +41,9 @@ class PirlEnvCfg(DirectRLEnvCfg):
     grid_inscribed_cost = 253.0  # Nav2 inscribed inflated obstacle cost
     grid_lethal_cost = 254.0  # Nav2 lethal obstacle cost
     grid_unknown_cost = 255.0  # Nav2 unknown space cost
-    grid_inflation_radius_m = 0.15  # inflation radius (meters)
-    grid_cost_scaling_factor = 10.0  # inflation exponential decay factor
+    # Nav2 InflationLayer defaults: inflation_radius=0.55, cost_scaling_factor=10.0
+    grid_inflation_radius_m = 0.15  # inflation radius (m); Nav2 default 0.55 (use ~0.15 for tighter inflation)
+    grid_cost_scaling_factor = 10.0  # exponential decay; Nav2 default 10.0
     grid_history_len = 4  # number of stacked costmaps (temporal context: CNN sees last K frames as channels)
     # Push a new frame into history every N env steps so that K frames span ~1 s (at 60 env Hz: 4*15=60 steps)
     grid_history_interval_steps = 15
@@ -131,36 +132,34 @@ class PirlEnvCfg(DirectRLEnvCfg):
     dof_names = ["left_wheel_joint", "right_wheel_joint"]
 
     # cmd_vel limits and robot geometry (for wheel speed conversion)
-    max_lin_vel = 0.5  # m/s
-    max_ang_vel = 0.5  # rad/s
+    max_lin_vel =0.5  # m/s
+    max_ang_vel = 3.0  # rad/s
     wheel_radius = 0.03  # m (60mm diameter)
     track_width = 0.242  # m
     
-    # reward scales
-    rew_scale_standstill = 0
-    standstill_speed_threshold = 0.05
-    spin_rate_threshold = 0.5
     # reward progress toward current path point
     rew_scale_progress = 10.0
     # one-time bonus when reaching each path point
     rew_goal_bonus = 10.0
     # small per-step penalty (must stay much smaller than goal bonus)
-    rew_step_penalty = -0.005
+    rew_step_penalty = 0.0
     # collision penalty (geometric: robot center vs obstacle centers)
-    rew_scale_collision = -5.0
+    rew_scale_collision = -15.0
     collision_robot_radius = 0.18  # m, for geometric collision (circle overlap in XY)
     # Dense proximity penalty (exp-shaped, capped below collision penalty magnitude).
     # Penalty activates when nearest obstacle in front sector is closer than this distance.
     proximity_activation_distance = 0.8  # m
     # Larger value -> steeper growth as obstacle gets closer.
-    proximity_exponential_rate = 1.5
+    proximity_exponential_rate = 0.5
     # Front sector used for proximity penalty to avoid over-penalizing blind rear space.
-    proximity_front_fov_deg = 140.0
+    proximity_front_fov_deg = 200.0
     # Absolute cap for proximity penalty magnitude (runtime also clamps to < |collision penalty|).
-    rew_proximity_max_penalty = 4.0
+    # Set to 0 to disable proximity penalty (code still runs, returns zeros).
+    rew_proximity_max_penalty = 0.0
     # Optional anti-reverse shaping (0 disables). Applies as: scale * relu(-forward_speed).
     rew_scale_reverse = -0.2
-
+    rew_scale_heading = 0.005
+    rew_scale_action_rate = -0.002
     # Custom params
     num_obstacles = 5
     obstacle_radius_range = (1.2, 2.0)  # Adjusted for 4m spacing

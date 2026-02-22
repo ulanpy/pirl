@@ -1,8 +1,3 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
 from collections.abc import Sequence
 import math
 
@@ -44,7 +39,11 @@ class PirlEnv(DirectRLEnv):
         self.path_manager = LocalPathManager(self.cfg, self.device, self.num_envs)
         self._latest_lidar_ranges_m = None
         self.proximity = ProximityReward(self.cfg, self.device, self.num_envs)
-        self.extras = {} 
+        self.extras = {}
+        # For action-rate reward: current and previous step actions (shape [num_envs, 2])
+        self.actions = torch.zeros((self.num_envs, 2), device=self.device)
+        self.prev_actions = torch.zeros((self.num_envs, 2), device=self.device)
+
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         # add ground plane with explicit friction
@@ -78,6 +77,8 @@ class PirlEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        # Save previous action before updating (for action-rate penalty in reward)
+        self.prev_actions.copy_(self.actions)
         # PPO actions are sampled from an unbounded Gaussian; clamp to keep in [-1, 1]
         self.actions = torch.clamp(actions, -1.0, 1.0).clone()
         dt = self.cfg.sim.dt * self.cfg.decimation
@@ -121,7 +122,7 @@ class PirlEnv(DirectRLEnv):
         self.curr_target_dist = torch.linalg.norm(to_target_w, dim=-1, keepdim=True)
 
         # Dot product: alignment (-1 to 1)
-        dot = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
+        self.dot = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
         # Cross product (z-component): turn direction
         cross = (self.forwards[:, 0] * self.commands[:, 1] - self.forwards[:, 1] * self.commands[:, 0]).unsqueeze(-1)
         # Ego-motion in body frame
@@ -151,13 +152,24 @@ class PirlEnv(DirectRLEnv):
         # Local path segment in robot frame
         path_obs = self.path_manager.get_segment(robot_pos_w, self.robot.data.root_quat_w, curr_idx)
 
-        vec_obs = torch.hstack((dot, cross, forward_speed, lateral_speed, yaw_rate, path_obs))
+        vec_obs = torch.hstack((self.dot, cross, forward_speed, lateral_speed, yaw_rate, path_obs))
         return {"policy": {"vec": vec_obs, "costmap": grid_obs}}
 
     def _get_rewards(self) -> torch.Tensor:
             # 1. Вычисляем отдельные компоненты
-            # Прогресс к цели
-            progress_val = (self.prev_target_dist - self.curr_target_dist) * self.cfg.rew_scale_progress
+            # Прогресс к цели (только поощряем приближение; отдаление/смена waypoint не штрафуем)
+            progress_val = torch.clamp(
+                self.prev_target_dist - self.curr_target_dist, min=0.0
+            ) * self.cfg.rew_scale_progress
+            
+            # Направление движения (keep shape [num_envs, 1] for reward sum and memory)
+            heading_val = (self.dot * self.cfg.rew_scale_heading)
+
+            # Штраф за скорость изменения действия [num_envs, 1]
+            rew_action_rate = (
+                self.cfg.rew_scale_action_rate * torch.sum(
+                    torch.square(self.actions - self.prev_actions), dim=-1, keepdim=True)
+            )
             
             # Штраф за близость (proximity)
             proximity_val = self.proximity.compute_penalty(self._latest_lidar_ranges_m)
@@ -181,7 +193,7 @@ class PirlEnv(DirectRLEnv):
             step_penalty_val = torch.full_like(forward_speed, self.cfg.rew_step_penalty)
 
             # 2. Итоговая награда
-            reward = progress_val + proximity_val + goal_bonus_val + collision_val + reverse_val + step_penalty_val
+            reward = progress_val + proximity_val + goal_bonus_val + collision_val + reverse_val + step_penalty_val+ heading_val+ rew_action_rate
 
             # 3. Обновляем буферы состояния
             self.prev_target_dist = self.curr_target_dist
@@ -198,13 +210,16 @@ class PirlEnv(DirectRLEnv):
             self.extras["log"]["rew/collision"] = torch.mean(collision_val)
             self.extras["log"]["rew/reverse"] = torch.mean(reverse_val)
             self.extras["log"]["rew/step_penalty"] = torch.mean(step_penalty_val)
+            self.extras["log"]["rew/heading"] = torch.mean(heading_val)
+            self.extras["log"]["rew/action_rate"] = torch.mean(rew_action_rate)
             self.extras["log"]["rew/total"] = torch.mean(reward)
 
             return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        path_done = self.path_manager.path_idx >= (self.cfg.path_num_points - 1)
+        # Episode ends when the first waypoint is reached (path_idx advanced from 0 to >= 1)
+        path_done = self.path_manager.path_idx >= 1
         robot_xy = self.robot.data.root_pos_w[:, :2]
         collision_done = self.obstacle_manager.collision_mask(
             robot_xy, self.scene.env_origins
