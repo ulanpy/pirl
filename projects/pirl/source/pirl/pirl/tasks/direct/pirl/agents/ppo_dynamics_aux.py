@@ -41,10 +41,10 @@ class PPODynamicsAux(PPO):
         device: Optional[Union[str, torch.device]] = None,
         cfg: Optional[dict] = None,
     ) -> None:
-        _cfg = copy.deepcopy(PPO_DEFAULT_CONFIG)
-        _cfg.update(PPODynamicsAux_default_config)
+        _cfg = copy.deepcopy(PPO_DEFAULT_CONFIG) # deepcopy потому что словари мутабельные 
+        _cfg.update(PPODynamicsAux_default_config) # дефолтные конфиги для PPO Dynamics Aux
 
-        _cfg.update(cfg if cfg is not None else {})
+        _cfg.update(cfg if cfg is not None else {}) # обновляем дефолтные конфиги пользовательскими, если они есть
         super().__init__(
             models=models,
             memory=memory,
@@ -52,7 +52,7 @@ class PPODynamicsAux(PPO):
             action_space=action_space,
             device=device,
             cfg=_cfg,
-        )
+        ) # вызываем конструктор базового класса PPO с обновленным конфигом
 
         # Aux dynamics config
         self._dynamics_loss_scale = float(self.cfg.get("dynamics_loss_scale", 0.0))
