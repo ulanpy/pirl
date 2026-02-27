@@ -42,11 +42,11 @@ class PirlEnvCfg(DirectRLEnvCfg):
     grid_lethal_cost = 254.0  # Nav2 lethal obstacle cost
     grid_unknown_cost = 255.0  # Nav2 unknown space cost
     # Nav2 InflationLayer defaults: inflation_radius=0.55, cost_scaling_factor=10.0
-    grid_inflation_radius_m = 0.15  # inflation radius (m); Nav2 default 0.55 (use ~0.15 for tighter inflation)
+    grid_inflation_radius_m = 0.55  # inflation radius (m); Nav2 default 0.55 (use ~0.15 for tighter inflation)
     grid_cost_scaling_factor = 10.0  # exponential decay; Nav2 default 10.0
     grid_history_len = 4  # number of stacked costmaps (temporal context: CNN sees last K frames as channels)
     # Push a new frame into history every N env steps so that K frames span ~1 s (at 60 env Hz: 4*15=60 steps)
-    grid_history_interval_steps = 15
+    grid_history_interval_steps = 4
     grid_normalize = True  # normalize costs for RL input
     # local path segment (Nav2-like: controller uses a local slice of the global path)
     # Fewer points spaced ~2 m apart so waypoint bonus is rarer and robot does not abuse it over obstacle avoidance.
@@ -78,6 +78,32 @@ class PirlEnvCfg(DirectRLEnvCfg):
     ground_static_friction = 0.7
     ground_dynamic_friction = 0.7
     ground_friction_combine = "max"
+    # Static warehouse scene (shelves + obstacles), no SceneBlox generation.
+    sceneblox_usd_paths: tuple[str, ...] = (
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/warehouse_with_forklifts.usd",
+    )
+    # Per-episode static obstacle randomization inside the warehouse.
+    dr_obstacle_usd_paths: tuple[str, ...] = (
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Props/Forklift/forklift.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLarge_A5.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A7.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A5.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A4.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_RackFrame_03.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_RackShelf_01.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_PaletteA_01.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_PaletteA_02.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxC_01.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxD_02.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/S_TrafficCone.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/S_WetFloorSign.usd",
+    )
+    dr_obstacle_slot_count = 24
+    dr_obstacle_count_range = (8, 18)
+    dr_obstacle_xy_range = ((-10.0, 10.0), (-10.0, 10.0))
+    dr_obstacle_keepout_radius = 1.8
+    dr_obstacle_min_separation = 2.0
+    dr_obstacle_max_sample_tries = 40
 
     # robot(s)
     robot_cfg: ArticulationCfg = JETTANK_CFG.replace(
@@ -86,13 +112,18 @@ class PirlEnvCfg(DirectRLEnvCfg):
     robot_cfg.init_state.pos = (0.0, 0.0, 0.03) 
     
     # sensors
+    # Empty scene: MultiMeshRayCaster requires at least one target; use ground so rays can hit floor or max_distance
     lidar = MultiMeshRayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base_link",
         offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0225)),
         mesh_prim_paths=[
             MultiMeshRayCasterCfg.RaycastTargetCfg(
-                prim_expr="/World/envs/env_.*/Obstacle_.*",
-                track_mesh_transforms=True,
+                prim_expr="/World/envs/env_.*/GeneratedScene/SM_.*",
+                track_mesh_transforms=False,
+            ),
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/GeneratedScene/DomainRandomization/Obstacle_.*",
+                track_mesh_transforms=False,
             ),
         ],
         pattern_cfg=patterns.LidarPatternCfg(
@@ -115,24 +146,13 @@ class PirlEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    # scene
-    # Keep envs far enough to avoid cross-env obstacle leakage into local costmaps.
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=50, env_spacing=6.0, replicate_physics=True)
-
-    # obstacles
-    obstacle_cfg = sim_utils.CylinderCfg(
-        radius=0.15,
-        height=0.5,
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
-        collision_props=sim_utils.CollisionPropertiesCfg(),
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-    )
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=80.0, replicate_physics=True)
 
     # controllable joints (explicit left/right order)
     dof_names = ["left_wheel_joint", "right_wheel_joint"]
 
     # cmd_vel limits and robot geometry (for wheel speed conversion)
-    max_lin_vel =0.5  # m/s
+    max_lin_vel = 0.5  # m/s
     max_ang_vel = 3.0  # rad/s
     wheel_radius = 0.03  # m (60mm diameter)
     track_width = 0.242  # m
@@ -143,37 +163,27 @@ class PirlEnvCfg(DirectRLEnvCfg):
     rew_goal_bonus = 10.0
     # small per-step penalty (must stay much smaller than goal bonus)
     rew_step_penalty = 0.0
-    # collision penalty (geometric: robot center vs obstacle centers)
-    rew_scale_collision = -15.0
-    collision_robot_radius = 0.18  # m, for geometric collision (circle overlap in XY)
-    # Dense proximity penalty (exp-shaped, capped below collision penalty magnitude).
+    rew_scale_collision = -50.0
+    collision_robot_radius = 0.18
+    # Dense proximity penalty (exp-shaped); 0 with no obstacles.
     # Penalty activates when nearest obstacle in front sector is closer than this distance.
     proximity_activation_distance = 0.8  # m
     # Larger value -> steeper growth as obstacle gets closer.
-    proximity_exponential_rate = 0.5
-    # Front sector used for proximity penalty to avoid over-penalizing blind rear space.
-    proximity_front_fov_deg = 200.0
-    # Absolute cap for proximity penalty magnitude (runtime also clamps to < |collision penalty|).
-    # Set to 0 to disable proximity penalty (code still runs, returns zeros).
-    rew_proximity_max_penalty = 0.0
+    proximity_exponential_rate = 2.0
+    # FOV for proximity penalty. Set to 360 to cover all sides.
+    proximity_front_fov_deg = 360.0
+    # Absolute cap for proximity penalty magnitude (should be negative).
+    rew_proximity_max_penalty = -0.05
+    # Additional penalty on positive closing speed (m/s) near obstacles.
+    rew_scale_proximity_rate = -0.05
+    # Apply proximity-rate penalty only when nearest range is below this distance.
+    proximity_rate_gate_distance = 1.2
     # Optional anti-reverse shaping (0 disables). Applies as: scale * relu(-forward_speed).
-    rew_scale_reverse = -0.2
-    rew_scale_heading = 0.005
-    rew_scale_action_rate = -0.002
-    # Custom params
-    num_obstacles = 5
-    obstacle_radius_range = (1.2, 2.0)  # Adjusted for 4m spacing
-    # Robot spawn: random XY in disk of this radius from env origin (inside obstacle ring)
-    robot_spawn_radius = 0.5
-    # Obstacles move at this speed (m/s); random direction per obstacle per env, bounce at boundary
-    obstacle_speed = 1.0
-    obstacle_boundary_radius = 2.2  # bounce when distance from env origin exceeds this
+    rew_scale_reverse = -0.5
+    rew_scale_heading = 0.01
+    # Penalty for yaw-command jitter (squared difference of normalized yaw action)
+    rew_scale_action_rate = -0.25
 
-    # Typical local avoidance scenario: robot in "start zone", path and obstacles ahead (like real deployment).
-    # Angles in radians; 0 = +X, pi/2 = +Y. Set all three to None to restore old "spawn in chaos" behavior.
-    # Spawn sector: back half so robot is not dropped in the middle of dynamics.
+    robot_spawn_radius = 0.5
     spawn_angle_range: tuple[float, float] | None = (math.pi * 0.5, math.pi * 1.5)
-    # Path points sector: e.g. (-pi/2, pi/2) = front half so path is ahead of spawn.
     path_angle_range: tuple[float, float] | None = (-math.pi * 0.5, math.pi * 0.5)
-    # Obstacles sector: e.g. (-pi/3, pi/3) = front cone so dynamics are ahead, not behind.
-    obstacle_angle_range: tuple[float, float] | None = (-math.pi / 3.0, math.pi / 3.0)

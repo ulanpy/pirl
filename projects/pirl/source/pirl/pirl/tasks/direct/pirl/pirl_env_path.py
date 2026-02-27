@@ -13,6 +13,9 @@ class LocalPathManager:
             (num_envs, cfg.path_num_points, 2), device=device
         )
         self.path_idx = torch.zeros(num_envs, dtype=torch.long, device=device)
+        # Fallback when robot is on top of waypoint (to_target ~ 0) so command stays non-zero
+        self._last_command_w = torch.zeros((num_envs, 3), device=device)
+        self._last_command_w[:, 0] = 1.0
 
     def reset(self, env_ids, env_origins: torch.Tensor) -> None:
         if env_ids is None:
@@ -43,6 +46,10 @@ class LocalPathManager:
         path_y = radial * torch.sin(headings)
         self.path_points_w[env_ids] = torch.stack((path_x, path_y), dim=-1) + env_origins.unsqueeze(1)
         self.path_idx[env_ids] = 0
+        # Reset command fallback so first direction comes from new path
+        self._last_command_w[env_ids, 0] = 1.0
+        self._last_command_w[env_ids, 1] = 0.0
+        self._last_command_w[env_ids, 2] = 0.0
 
     def update_commands(self, robot_pos_w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         curr_idx = torch.clamp(self.path_idx, max=self.cfg.path_num_points - 1)
@@ -60,8 +67,15 @@ class LocalPathManager:
         to_target_w = curr_targets_w - robot_pos_w
         to_target_w_3 = torch.zeros((self.num_envs, 3), device=self.device)
         to_target_w_3[:, :2] = to_target_w
-        to_target_norm = torch.linalg.norm(to_target_w_3, dim=-1, keepdim=True).clamp(min=1e-6)
-        commands = to_target_w_3 / to_target_norm
+        to_target_norm = torch.linalg.norm(to_target_w_3, dim=-1, keepdim=True)
+        # Use last non-zero command when on top of waypoint so every env has a valid direction
+        small = (to_target_norm.squeeze(-1) < 1e-3)
+        commands = torch.where(
+            small.unsqueeze(-1),
+            self._last_command_w,
+            to_target_w_3 / to_target_norm.clamp(min=1e-6),
+        )
+        self._last_command_w.copy_(commands)
         yaws = torch.atan2(commands[:, 1], commands[:, 0]).unsqueeze(-1)
         return commands, yaws, curr_idx
 

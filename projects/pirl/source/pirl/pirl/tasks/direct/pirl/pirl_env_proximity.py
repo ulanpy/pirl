@@ -19,29 +19,41 @@ class ProximityReward:
         half_fov = 0.5 * float(self.cfg.proximity_front_fov_deg)
         return torch.abs(angles) <= half_fov
 
+    def min_selected_range(self, lidar_ranges_m: torch.Tensor) -> torch.Tensor:
+        """Return [num_envs, 1] min range in configured proximity FOV."""
+        num_rays = lidar_ranges_m.shape[1]
+        mask = self._ray_mask[:num_rays]
+        selected = (
+            lidar_ranges_m
+            if (mask.numel() == 0 or not bool(torch.any(mask)))
+            else lidar_ranges_m[:, mask]
+        )
+        return selected.min(dim=1, keepdim=True).values
+
     def compute_penalty(self, lidar_ranges_m: torch.Tensor | None) -> torch.Tensor:
-        """Return [num_envs, 1] penalty (<= 0). Uses front-sector min range; capped below collision penalty."""
+        """Return [num_envs, 1] penalty. Uses sign from config (should be negative)."""
         if lidar_ranges_m is None:
             return torch.zeros((self.num_envs, 1), device=self.device)
 
-        max_prox_penalty = float(self.cfg.rew_proximity_max_penalty)
-        if max_prox_penalty <= 0.0:
+        prox_scale = float(self.cfg.rew_proximity_max_penalty)
+        if abs(prox_scale) <= 1e-6:
             return torch.zeros((self.num_envs, 1), device=self.device)
 
-        ranges = lidar_ranges_m
-        num_rays = ranges.shape[1]
-        mask = self._ray_mask[:num_rays]
-        if mask.numel() == 0 or not bool(torch.any(mask)):
-            selected = ranges
-        else:
-            selected = ranges[:, mask]
-
-        min_range = selected.min(dim=1, keepdim=True).values
+        min_range = self.min_selected_range(lidar_ranges_m)
         activation_distance = float(self.cfg.proximity_activation_distance)
         exp_rate = float(self.cfg.proximity_exponential_rate)
         proximity = torch.clamp(activation_distance - min_range, min=0.0)
         penalty_ratio = 1.0 - torch.exp(-exp_rate * proximity)
 
-        collision_cap = max(abs(float(self.cfg.rew_scale_collision)) - 1e-6, 0.0)
-        penalty_cap = min(max_prox_penalty, collision_cap)
-        return -penalty_cap * penalty_ratio
+        # Keep dense penalty magnitude strictly smaller than terminal collision penalty if it exists.
+        collision_scale = abs(float(self.cfg.rew_scale_collision))
+        magnitude = abs(prox_scale)
+        
+        if collision_scale > 1e-3:
+            cap = min(magnitude, collision_scale - 1e-6)
+        else:
+            cap = magnitude
+            
+        # Return value with original sign
+        sign = 1.0 if prox_scale > 0 else -1.0
+        return (sign * cap) * penalty_ratio
