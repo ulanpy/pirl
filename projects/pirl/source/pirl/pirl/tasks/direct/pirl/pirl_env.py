@@ -6,12 +6,13 @@ import isaaclab.sim as sim_utils
 import torch
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sensors import MultiMeshRayCaster
+from isaaclab.sensors import MultiMeshRayCaster, MultiMeshRayCasterCfg
 import isaaclab.utils.math as math_utils
-from isaacsim.core.prims import SingleXFormPrim
 
 from .pirl_env_cfg import PirlEnvCfg
 from .pirl_env_costmap import LocalCostmapBuilder
+from .pirl_env_dr_obstacles import DomainRandomizationObstacles
+from .pirl_env_people import PeopleManager
 from .pirl_env_path import LocalPathManager
 from .pirl_env_proximity import ProximityReward
 from .pirl_env_visuals import define_markers, define_path_markers, visualize_markers
@@ -47,13 +48,7 @@ class PirlEnv(DirectRLEnv):
         self.prev_min_prox_range = torch.full(
             (self.num_envs, 1), float(self.cfg.lidar.max_distance), device=self.device
         )
-
-    @staticmethod
-    def _dr_scale_from_asset_path(asset_path: str) -> tuple[float, float, float]:
-        # ArchVis industrial assets are authored in centimeters; scale down to Isaac scene units (meters).
-        if "/NVIDIA/Assets/ArchVis/" in asset_path:
-            return (0.01, 0.01, 0.01)
-        return (1.0, 1.0, 1.0)
+        # IRA setup deferred to first reset() so NavMesh bakes after sim has run and scene is composed.
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
@@ -77,7 +72,27 @@ class PirlEnv(DirectRLEnv):
 
         self.scene.clone_environments(copy_from_source=False)
         self.scene.articulations["robot"] = self.robot
-        self._setup_domain_randomization_obstacles()
+        self.dr_obstacles = DomainRandomizationObstacles(
+            self.cfg, self.device, self.num_envs
+        )
+        self.dr_obstacles.setup()
+        self.people = PeopleManager(self.cfg, self.device)
+        self.people.setup()
+        # Register robot as dynamic obstacle for omni.anim.people avoidance.
+        try:
+            import omni.anim.people as oap
+            oap.add_dynamic_obstacle_behavior_script("/World/envs/env_0/Robot")
+        except Exception:
+            pass
+        # People as lidar targets: only if enabled and pattern exists at init time.
+        people_lidar = bool(getattr(self.cfg, "people_lidar_targets_enabled", False))
+        if people_lidar and self.num_envs == 1:
+            self.cfg.lidar.mesh_prim_paths.append(
+                MultiMeshRayCasterCfg.RaycastTargetCfg(
+                    prim_expr="/World/Characters/Character.*",
+                    track_mesh_transforms=True,
+                )
+            )
 
         # Initialize sensors
         self.lidar = MultiMeshRayCaster(self.cfg.lidar)
@@ -91,138 +106,13 @@ class PirlEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-    def _setup_domain_randomization_obstacles(self) -> None:
-        """Create obstacle slots once; each episode we only randomize pose/visibility."""
-        self._dr_obstacle_prims: list[list[SingleXFormPrim]] = []
-        asset_paths = tuple(getattr(self.cfg, "dr_obstacle_usd_paths", ()))
-        if len(asset_paths) == 0:
-            return
-
-        hidden_pos = (0.0, 0.0, -15.0)
-        identity_quat = (1.0, 0.0, 0.0, 0.0)
-
-        for env_id in range(self.num_envs):
-            ns_path = f"/World/envs/env_{env_id}/GeneratedScene/DomainRandomization"
-            try:
-                sim_utils.create_prim(ns_path, prim_type="Xform")
-            except ValueError:
-                pass
-
-        max_slots = int(getattr(self.cfg, "dr_obstacle_slot_count", 0))
-        for slot_idx in range(max_slots):
-            asset_path = asset_paths[slot_idx % len(asset_paths)]
-            asset_scale = self._dr_scale_from_asset_path(asset_path)
-            created_paths: list[str] = []
-            slot_prims: list[SingleXFormPrim] = []
-            slot_ok = True
-            for env_id in range(self.num_envs):
-                prim_path = f"/World/envs/env_{env_id}/GeneratedScene/DomainRandomization/Obstacle_{slot_idx}"
-                try:
-                    sim_utils.create_prim(
-                        prim_path=prim_path,
-                        prim_type="Xform",
-                        translation=hidden_pos,
-                        orientation=identity_quat,
-                        usd_path=asset_path,
-                    )
-                    created_paths.append(prim_path)
-                    prim = SingleXFormPrim(prim_path, reset_xform_properties=False)
-                    prim.set_local_scale(asset_scale)
-                    prim.set_visibility(False)
-                    slot_prims.append(prim)
-                except Exception:
-                    slot_ok = False
-                    break
-            if not slot_ok:
-                for created_path in created_paths:
-                    try:
-                        sim_utils.delete_prim(created_path)
-                    except Exception:
-                        pass
-                continue
-            self._dr_obstacle_prims.append(slot_prims)
-
-    def _randomize_domain_obstacles(self, env_ids: Sequence[int] | torch.Tensor) -> None:
-        if not hasattr(self, "_dr_obstacle_prims") or len(self._dr_obstacle_prims) == 0:
-            return
-        if len(env_ids) == 0:
-            return
-
-        x_range, y_range = self.cfg.dr_obstacle_xy_range
-        keepout = float(self.cfg.dr_obstacle_keepout_radius)
-        min_sep = float(self.cfg.dr_obstacle_min_separation)
-        max_tries = int(self.cfg.dr_obstacle_max_sample_tries)
-        min_count, max_count = self.cfg.dr_obstacle_count_range
-        max_count = min(int(max_count), len(self._dr_obstacle_prims))
-        min_count = min(int(min_count), max_count)
-
-        env_ids_list = (
-            env_ids.tolist()
-            if isinstance(env_ids, torch.Tensor)
-            else list(env_ids)
-        )
-        for env_id in env_ids_list:
-            env_origin = self.scene.env_origins[env_id]
-            hidden_pos = (float(env_origin[0]), float(env_origin[1]), -15.0)
-            identity_quat = (1.0, 0.0, 0.0, 0.0)
-            for slot_idx in range(len(self._dr_obstacle_prims)):
-                prim = self._dr_obstacle_prims[slot_idx][env_id]
-                prim.set_world_pose(position=hidden_pos, orientation=identity_quat)
-                prim.set_visibility(False)
-
-            active_count = int(
-                torch.randint(min_count, max_count + 1, (1,), device=self.device).item()
-            )
-            active_count = min(active_count, len(self._dr_obstacle_prims))
-            perm = torch.randperm(len(self._dr_obstacle_prims), device=self.device).tolist()
-
-            placed_xy: list[tuple[float, float]] = []
-            activated = 0
-            for slot_idx in perm:
-                if activated >= active_count:
-                    break
-                sample_ok = False
-                cand_x = 0.0
-                cand_y = 0.0
-                for _ in range(max_tries):
-                    cand_x = float(torch.empty(1, device=self.device).uniform_(x_range[0], x_range[1]).item())
-                    cand_y = float(torch.empty(1, device=self.device).uniform_(y_range[0], y_range[1]).item())
-                    if (cand_x * cand_x + cand_y * cand_y) < (keepout * keepout):
-                        continue
-                    too_close = False
-                    for px, py in placed_xy:
-                        dx = cand_x - px
-                        dy = cand_y - py
-                        if (dx * dx + dy * dy) < (min_sep * min_sep):
-                            too_close = True
-                            break
-                    if not too_close:
-                        sample_ok = True
-                        break
-                if not sample_ok:
-                    continue
-
-                yaw = float(
-                    torch.empty(1, device=self.device).uniform_(-math.pi, math.pi).item()
-                )
-                half = 0.5 * yaw
-                quat_wxyz = (math.cos(half), 0.0, 0.0, math.sin(half))
-                world_pos = (
-                    float(env_origin[0]) + cand_x,
-                    float(env_origin[1]) + cand_y,
-                    0.0,
-                )
-                prim = self._dr_obstacle_prims[slot_idx][env_id]
-                prim.set_world_pose(position=world_pos, orientation=quat_wxyz)
-                prim.set_visibility(True)
-                placed_xy.append((cand_x, cand_y))
-                activated += 1
-
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         # Save previous action before updating (for action-rate penalty in reward)
         self.prev_actions.copy_(self.actions)
         # PPO actions are sampled from an unbounded Gaussian; clamp to keep in [-1, 1]
         self.actions = torch.clamp(actions, -1.0, 1.0).clone()
+        # Update people each env step; works even when AnimGraph command path is unavailable.
+        self.people.step(self.cfg.sim.dt * self.cfg.decimation, self.scene.env_origins)
         visualize_markers(
             self.visualization_markers,
             self.path_markers,
@@ -380,9 +270,10 @@ class PirlEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        path_done = self.path_manager.path_idx >= 1
+        # path_done = self.path_manager.path_idx >= 1
         collision_done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        die = path_done | collision_done
+        #die = path_done | collision_done
+        die = collision_done
         return die, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -415,10 +306,13 @@ class PirlEnv(DirectRLEnv):
             root_state[:, 4] = 0.0
             root_state[:, 5] = 0.0
             root_state[:, 6] = torch.sin(half)
-        self.robot.write_root_state_to_sim(root_state, env_ids_t)
+        # PhysX backend expects tensor-like indices here.
+        self.robot.write_root_state_to_sim(root_state, env_ids_t)  # type: ignore[arg-type]
 
         # Episode-level domain randomization for static obstacles.
-        self._randomize_domain_obstacles(env_ids_seq)
+        self.dr_obstacles.reset(env_ids_t, self.scene.env_origins)
+        # Runtime dynamic people.
+        self.people.reset(env_ids_t, self.scene.env_origins)
         
         # Reset sensors
         self.lidar.reset(env_ids_seq)

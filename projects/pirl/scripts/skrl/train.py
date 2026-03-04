@@ -61,6 +61,18 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+# Ensure animation schema extensions are loaded by Kit at startup time.
+# Loading these after app startup can be too late for AnimationGraphAPI registration.
+required_kit_args = (
+    "--enable omni.anim.graph.schema "
+    "--enable omni.anim.graph.core "
+    "--enable omni.anim.people "
+    "--enable omni.anim.navigation.core "
+    "--enable isaacsim.replicator.agent.core"
+)
+existing_kit_args = getattr(args_cli, "kit_args", "") or ""
+if required_kit_args not in existing_kit_args:
+    args_cli.kit_args = (existing_kit_args + " " + required_kit_args).strip()
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True

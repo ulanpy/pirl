@@ -51,7 +51,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # local path segment (Nav2-like: controller uses a local slice of the global path)
     # Fewer points spaced ~2 m apart so waypoint bonus is rarer and robot does not abuse it over obstacle avoidance.
     path_num_points = 4  # waypoints along path (spaced ~2 m)
-    path_segment_len = 1  # points provided to policy
+    path_segment_len = 5  # points provided to policy
     path_radius_range = (0.6, 6.0)  # path from 0.6 m to 6 m from env origin → ~2 m between consecutive waypoints
     path_goal_threshold = 0.4  # distance to count waypoint as reached (slightly larger for 2 m spacing)
     observation_space = gym.spaces.Dict(
@@ -104,6 +104,31 @@ class PirlEnvCfg(DirectRLEnvCfg):
     dr_obstacle_keepout_radius = 1.8
     dr_obstacle_min_separation = 2.0
     dr_obstacle_max_sample_tries = 40
+    # Runtime people as dynamic obstacles (IRA/AnimPeople). Set False to disable or use full IRA workflow.
+    people_enabled = True
+    people_slot_count = 6
+    people_count_range = (2, 5)
+    people_spawn_xy_range = ((-8.0, 8.0), (-8.0, 8.0))
+    people_nav_xy_range = ((-8.5, 8.5), (-8.5, 8.5))
+    people_keepout_radius = 1.5
+    people_min_separation = 1.2
+    people_max_sample_tries = 40
+    people_idle_duration_range = (1.0, 3.0)
+    people_command_horizon = 3
+    people_use_anim_graph = True
+    people_replan_interval_s = 2.0
+    people_speed_range = (0.6, 1.2)
+    people_target_reach_dist = 0.35
+    people_min_mesh_count = 1
+    people_debug_visual_scale = 1.0
+    people_force_single_asset = True
+    people_use_biped_asset = False  # Biped has biped_demo_meters (not SkelRoot); use standard chars
+    people_biped_stand_rotation_deg = 90.0  # Rotation around X to stand (Y-up→Z-up)
+    people_character_root_z_lift = 0.0  # ManRoot/asset origin at feet; 0 = feet on floor
+    people_floor_z_world = 0.0  # Floor Z in world (matches dr_obstacles)
+    people_character_parent_path = "/World/Characters"  # World space; env_0 has Z offset that breaks placement
+    people_lidar_targets_enabled = False  # lidar detects people; disable if init fails
+    people_asset_root: str | None = None
 
     # robot(s)
     robot_cfg: ArticulationCfg = JETTANK_CFG.replace(
