@@ -11,8 +11,8 @@ import isaaclab.utils.math as math_utils
 
 from .pirl_env_cfg import PirlEnvCfg
 from .pirl_env_costmap import LocalCostmapBuilder
+from .pirl_env_dyn_obstacles import DynamicObstaclesManager
 from .pirl_env_dr_obstacles import DomainRandomizationObstacles
-from .pirl_env_people import PeopleManager
 from .pirl_env_path import LocalPathManager
 from .pirl_env_proximity import ProximityReward
 from .pirl_env_visuals import define_markers, define_path_markers, visualize_markers
@@ -70,32 +70,29 @@ class PirlEnv(DirectRLEnv):
             translation=(0.0, 0.0, 0.0),
         )
 
-        self.scene.clone_environments(copy_from_source=False)
+        # copy_from_source=True: each env gets full copy so dr_obstacles can add Obstacle_* per env.
+        self.scene.clone_environments(copy_from_source=True)
         self.scene.articulations["robot"] = self.robot
         self.dr_obstacles = DomainRandomizationObstacles(
             self.cfg, self.device, self.num_envs
         )
         self.dr_obstacles.setup()
-        self.people = PeopleManager(self.cfg, self.device)
-        self.people.setup()
-        # Register robot as dynamic obstacle for omni.anim.people avoidance.
-        try:
-            import omni.anim.people as oap
-            oap.add_dynamic_obstacle_behavior_script("/World/envs/env_0/Robot")
-        except Exception:
-            pass
-        # People as lidar targets: only if enabled and pattern exists at init time.
-        people_lidar = bool(getattr(self.cfg, "people_lidar_targets_enabled", False))
-        if people_lidar and self.num_envs == 1:
+        self.dyn_obstacles = DynamicObstaclesManager(self.cfg, self.device, self.num_envs)
+        self.dyn_obstacles.setup()
+        self.cfg.lidar.mesh_prim_paths = self._build_static_lidar_targets_from_stage()
+        # Dynamic obstacle meshes as lidar targets.
+        if self.cfg.dyn_obstacle_enabled:
             self.cfg.lidar.mesh_prim_paths.append(
                 MultiMeshRayCasterCfg.RaycastTargetCfg(
-                    prim_expr="/World/Characters/Character.*",
+                    prim_expr="/World/envs/env_.*/GeneratedScene/DynamicObstacles/DynObstacle_.*",
                     track_mesh_transforms=True,
                 )
             )
 
         # Initialize sensors
         self.lidar = MultiMeshRayCaster(self.cfg.lidar)
+        if self.cfg.lidar.debug_vis:
+            self._patch_lidar_debug_vis_callback()
         self.scene.sensors["lidar"] = self.lidar
 
         # Initialize markers
@@ -106,13 +103,49 @@ class PirlEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
+    def _build_static_lidar_targets_from_stage(self) -> list[MultiMeshRayCasterCfg.RaycastTargetCfg]:
+        """Build exact static lidar target expressions from loaded scene meshes."""
+        fallback_targets = list(self.cfg.lidar.mesh_prim_paths)
+        stage = sim_utils.get_current_stage()
+        root_path = "/World/envs/env_0/GeneratedScene"
+        root_prim = stage.GetPrimAtPath(root_path)
+        if not root_prim.IsValid():
+            return fallback_targets
+
+        top_level_with_mesh: set[str] = set()
+        stack = [root_prim]
+        while stack:
+            prim = stack.pop()
+            prim_path = str(prim.GetPrimPath())
+            if prim.GetTypeName() == "Mesh" and "/collisions/" not in prim_path:
+                rel = prim_path[len(root_path) + 1 :]
+                if rel:
+                    top = rel.split("/", 1)[0]
+                    if top != "DynamicObstacles":
+                        top_level_with_mesh.add(top)
+            for child in prim.GetChildren():
+                stack.append(child)
+
+        if not top_level_with_mesh:
+            return fallback_targets
+
+        targets: list[MultiMeshRayCasterCfg.RaycastTargetCfg] = []
+        for top in sorted(top_level_with_mesh):
+            targets.append(
+                MultiMeshRayCasterCfg.RaycastTargetCfg(
+                    prim_expr=f"/World/envs/env_.*/GeneratedScene/{top}.*",
+                    track_mesh_transforms=False,
+                )
+            )
+        return targets
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         # Save previous action before updating (for action-rate penalty in reward)
         self.prev_actions.copy_(self.actions)
         # PPO actions are sampled from an unbounded Gaussian; clamp to keep in [-1, 1]
         self.actions = torch.clamp(actions, -1.0, 1.0).clone()
-        # Update people each env step; works even when AnimGraph command path is unavailable.
-        self.people.step(self.cfg.sim.dt * self.cfg.decimation, self.scene.env_origins)
+        # Update moving obstacle poses each env step.
+        self.dyn_obstacles.step(self.cfg.sim.dt * self.cfg.decimation, self.scene.env_origins)
         visualize_markers(
             self.visualization_markers,
             self.path_markers,
@@ -126,6 +159,37 @@ class PirlEnv(DirectRLEnv):
             self.cfg,
             self.device,
         )
+
+    def _patch_lidar_debug_vis_callback(self) -> None:
+        """Render stable lidar debug points (hits + max-range misses) without callback spam."""
+
+        def _safe_debug_callback(event):
+            # During startup callback can fire before ray-caster fully initializes internal buffers.
+            if (
+                not hasattr(self.lidar, "ray_visualizer")
+                or not hasattr(self.lidar, "drift")
+                or not hasattr(self.lidar, "_data")
+            ):
+                return
+            ray_hits_w = self.lidar._data.ray_hits_w
+            if ray_hits_w is None:
+                return
+            ray_starts_w = getattr(self.lidar, "_ray_starts_w", None)
+            ray_dirs_w = getattr(self.lidar, "_ray_directions_w", None)
+            if ray_starts_w is None or ray_dirs_w is None:
+                return
+            # Build visualization points: true hits; misses shown at max range endpoint.
+            miss_mask = torch.any(~torch.isfinite(ray_hits_w), dim=2)
+            viz_points = ray_hits_w.clone()
+            viz_points[miss_mask] = (
+                ray_starts_w[miss_mask] + ray_dirs_w[miss_mask] * float(self.cfg.lidar.max_distance)
+            )
+            viz_points = viz_points.reshape(-1, 3)
+            if viz_points.numel() == 0:
+                return
+            self.lidar.ray_visualizer.visualize(viz_points)
+
+        self.lidar._debug_vis_callback = _safe_debug_callback
 
     def _apply_action(self) -> None:
         # Map normalized actions to cmd_vel, then to wheel angular speeds
@@ -311,8 +375,8 @@ class PirlEnv(DirectRLEnv):
 
         # Episode-level domain randomization for static obstacles.
         self.dr_obstacles.reset(env_ids_t, self.scene.env_origins)
-        # Runtime dynamic people.
-        self.people.reset(env_ids_t, self.scene.env_origins)
+        # Runtime dynamic obstacles.
+        self.dyn_obstacles.reset(env_ids_t, self.scene.env_origins)
         
         # Reset sensors
         self.lidar.reset(env_ids_seq)

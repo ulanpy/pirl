@@ -104,31 +104,33 @@ class PirlEnvCfg(DirectRLEnvCfg):
     dr_obstacle_keepout_radius = 1.8
     dr_obstacle_min_separation = 2.0
     dr_obstacle_max_sample_tries = 40
-    # Runtime people as dynamic obstacles (IRA/AnimPeople). Set False to disable or use full IRA workflow.
-    people_enabled = True
-    people_slot_count = 6
-    people_count_range = (2, 5)
-    people_spawn_xy_range = ((-8.0, 8.0), (-8.0, 8.0))
-    people_nav_xy_range = ((-8.5, 8.5), (-8.5, 8.5))
-    people_keepout_radius = 1.5
-    people_min_separation = 1.2
-    people_max_sample_tries = 40
-    people_idle_duration_range = (1.0, 3.0)
-    people_command_horizon = 3
-    people_use_anim_graph = True
-    people_replan_interval_s = 2.0
-    people_speed_range = (0.6, 1.2)
-    people_target_reach_dist = 0.35
-    people_min_mesh_count = 1
-    people_debug_visual_scale = 1.0
-    people_force_single_asset = True
-    people_use_biped_asset = False  # Biped has biped_demo_meters (not SkelRoot); use standard chars
-    people_biped_stand_rotation_deg = 90.0  # Rotation around X to stand (Y-up→Z-up)
-    people_character_root_z_lift = 0.0  # ManRoot/asset origin at feet; 0 = feet on floor
-    people_floor_z_world = 0.0  # Floor Z in world (matches dr_obstacles)
-    people_character_parent_path = "/World/Characters"  # World space; env_0 has Z offset that breaks placement
-    people_lidar_targets_enabled = False  # lidar detects people; disable if init fails
-    people_asset_root: str | None = None
+    # Runtime dynamic obstacles (stable replacement for people in RL training).
+    dyn_obstacle_enabled = True
+    # Variety of non-trivial props (chairs/storage/table) for lidar obstacle perception.
+    # ArchVis assets are in centimeters; DynamicObstaclesManager scales them to meters.
+    # How to discover valid USD URLs later:
+    #   curl -s "https://omniverse-content-production.s3-us-west-2.amazonaws.com/?prefix=Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/&max-keys=1000"
+    # Then pick <Key>...*.usd</Key> entries and prepend:
+    #   https://omniverse-content-production.s3-us-west-2.amazonaws.com/
+    dyn_obstacle_usd_paths: tuple[str, ...] = (
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Seating/Jobba/Jobba_Chair.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Seating/Petite_Chair.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Seating/Stackable.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Seating/Caprice/Caprice_A.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Storage/Contemporary/Contemporary_StorageCube.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Storage/Standard/Standard_SmallUnit.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Tables/OakTableSmall.usd",
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Tables/Kettle.usd",
+    )
+    dyn_obstacle_slot_count = 16
+    dyn_obstacle_count_range = (6, 12)
+    dyn_obstacle_xy_range = ((-8.0, 8.0), (-8.0, 8.0))
+    dyn_obstacle_keepout_radius = 1.5
+    dyn_obstacle_min_separation = 1.5
+    dyn_obstacle_max_sample_tries = 40
+    dyn_obstacle_motion_radius_range = (0.4, 1.0)
+    dyn_obstacle_motion_speed_range = (0.2, 0.8)  # angular speed, rad/s
+    dyn_obstacle_z_world = 0.03
 
     # robot(s)
     robot_cfg: ArticulationCfg = JETTANK_CFG.replace(
@@ -140,14 +142,11 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Empty scene: MultiMeshRayCaster requires at least one target; use ground so rays can hit floor or max_distance
     lidar = MultiMeshRayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base_link",
-        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0225)),
+        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.25)),
         mesh_prim_paths=[
+            # Some environment meshes are rooted directly under SM_* prims.
             MultiMeshRayCasterCfg.RaycastTargetCfg(
                 prim_expr="/World/envs/env_.*/GeneratedScene/SM_.*",
-                track_mesh_transforms=False,
-            ),
-            MultiMeshRayCasterCfg.RaycastTargetCfg(
-                prim_expr="/World/envs/env_.*/GeneratedScene/DomainRandomization/Obstacle_.*",
                 track_mesh_transforms=False,
             ),
         ],
@@ -171,7 +170,8 @@ class PirlEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=80.0, replicate_physics=True)
+    # Multi-env scene; dynamic obstacles are created under each env namespace.
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=10, env_spacing=35.0, replicate_physics=True)
 
     # controllable joints (explicit left/right order)
     dof_names = ["left_wheel_joint", "right_wheel_joint"]
