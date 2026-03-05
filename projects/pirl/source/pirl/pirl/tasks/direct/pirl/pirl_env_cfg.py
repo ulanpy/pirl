@@ -143,10 +143,24 @@ class PirlEnvCfg(DirectRLEnvCfg):
     lidar = MultiMeshRayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base_link",
         offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.25)),
+        # Только yaw: иначе при наклоне робота передние лучи уходят вниз и бьют в пол (GroundPlane) на 2–3 м.
+        ray_alignment="yaw",
+        # Таргеты под GeneratedScene. Корень Warehouse_* не трогаем (xform); под ним — только SM_*.
         mesh_prim_paths=[
-            # Some environment meshes are rooted directly under SM_* prims.
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/GeneratedScene/GroundPlane",
+                track_mesh_transforms=False,
+            ),
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/GeneratedScene/Forklift.*",
+                track_mesh_transforms=False,
+            ),
             MultiMeshRayCasterCfg.RaycastTargetCfg(
                 prim_expr="/World/envs/env_.*/GeneratedScene/SM_.*",
+                track_mesh_transforms=False,
+            ),
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/GeneratedScene/Warehouse_Empty_small_realtime/SM_.*",
                 track_mesh_transforms=False,
             ),
         ],
@@ -158,7 +172,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
         ),
         # Slightly above real range to ease debugging
         max_distance=18.0,
-        debug_vis=False,
+        debug_vis=True,
         visualizer_cfg=RAY_CASTER_MARKER_CFG.replace(
             prim_path="/Visuals/LidarHits",
             markers={
@@ -171,7 +185,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     )
 
     # Multi-env scene; dynamic obstacles are created under each env namespace.
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=10, env_spacing=35.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=35.0, replicate_physics=True)
 
     # controllable joints (explicit left/right order)
     dof_names = ["left_wheel_joint", "right_wheel_joint"]

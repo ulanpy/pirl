@@ -79,8 +79,14 @@ class PirlEnv(DirectRLEnv):
         self.dr_obstacles.setup()
         self.dyn_obstacles = DynamicObstaclesManager(self.cfg, self.device, self.num_envs)
         self.dyn_obstacles.setup()
-        self.cfg.lidar.mesh_prim_paths = self._build_static_lidar_targets_from_stage()
-        # Dynamic obstacle meshes as lidar targets.
+        # Доп. таргеты лидара (каждый prim_expr должен совпасть хотя бы с одним примом).
+        if getattr(self.cfg, "dr_obstacle_usd_paths", ()):
+            self.cfg.lidar.mesh_prim_paths.append(
+                MultiMeshRayCasterCfg.RaycastTargetCfg(
+                    prim_expr="/World/envs/env_.*/GeneratedScene/DomainRandomization/Obstacle_.*",
+                    track_mesh_transforms=True,
+                )
+            )
         if self.cfg.dyn_obstacle_enabled:
             self.cfg.lidar.mesh_prim_paths.append(
                 MultiMeshRayCasterCfg.RaycastTargetCfg(
@@ -102,42 +108,6 @@ class PirlEnv(DirectRLEnv):
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
-
-    def _build_static_lidar_targets_from_stage(self) -> list[MultiMeshRayCasterCfg.RaycastTargetCfg]:
-        """Build exact static lidar target expressions from loaded scene meshes."""
-        fallback_targets = list(self.cfg.lidar.mesh_prim_paths)
-        stage = sim_utils.get_current_stage()
-        root_path = "/World/envs/env_0/GeneratedScene"
-        root_prim = stage.GetPrimAtPath(root_path)
-        if not root_prim.IsValid():
-            return fallback_targets
-
-        top_level_with_mesh: set[str] = set()
-        stack = [root_prim]
-        while stack:
-            prim = stack.pop()
-            prim_path = str(prim.GetPrimPath())
-            if prim.GetTypeName() == "Mesh" and "/collisions/" not in prim_path:
-                rel = prim_path[len(root_path) + 1 :]
-                if rel:
-                    top = rel.split("/", 1)[0]
-                    if top != "DynamicObstacles":
-                        top_level_with_mesh.add(top)
-            for child in prim.GetChildren():
-                stack.append(child)
-
-        if not top_level_with_mesh:
-            return fallback_targets
-
-        targets: list[MultiMeshRayCasterCfg.RaycastTargetCfg] = []
-        for top in sorted(top_level_with_mesh):
-            targets.append(
-                MultiMeshRayCasterCfg.RaycastTargetCfg(
-                    prim_expr=f"/World/envs/env_.*/GeneratedScene/{top}.*",
-                    track_mesh_transforms=False,
-                )
-            )
-        return targets
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         # Save previous action before updating (for action-rate penalty in reward)
