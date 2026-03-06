@@ -141,10 +141,11 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # sensors
     # Empty scene: MultiMeshRayCaster requires at least one target; use ground so rays can hit floor or max_distance
     lidar = MultiMeshRayCasterCfg(
-        prim_path="/World/envs/env_.*/Robot/base_link",
-        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.25)),
-        # Только yaw: иначе при наклоне робота передние лучи уходят вниз и бьют в пол (GroundPlane) на 2–3 м.
-        ray_alignment="yaw",
+        prim_path="/World/envs/env_.*/Robot/lidar_link",
+        # Use lidar_link pose from URDF directly.
+        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0)),
+        # Rays rotate with robot heading/body.
+        ray_alignment="base",
         # Таргеты под GeneratedScene. Корень Warehouse_* не трогаем (xform); под ним — только SM_*.
         mesh_prim_paths=[
             MultiMeshRayCasterCfg.RaycastTargetCfg(

@@ -58,7 +58,8 @@
     </collision>
   </link>
   <joint name="lidar_joint" type="fixed">
-    <origin rpy="0 0 0" xyz="0.0959394 0.0 0.1283962"/>
+    <!-- Slight upward pitch (~5 deg). Sign is robot-frame dependent. -->
+    <origin rpy="0 -0.0436332313 0" xyz="0.0959394 0.0 0.1283962"/>
     <parent link="base_link"/>
     <child link="lidar_link"/>
     <axis xyz="0 0 0"/>
