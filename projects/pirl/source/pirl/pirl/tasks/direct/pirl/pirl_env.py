@@ -84,7 +84,7 @@ class PirlEnv(DirectRLEnv):
             self.cfg.lidar.mesh_prim_paths.append(
                 MultiMeshRayCasterCfg.RaycastTargetCfg(
                     prim_expr="/World/envs/env_.*/GeneratedScene/DomainRandomization/Obstacle_.*",
-                    track_mesh_transforms=True,
+                    track_mesh_transforms=False,
                 )
             )
         if self.cfg.dyn_obstacle_enabled:
@@ -304,9 +304,12 @@ class PirlEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        # path_done = self.path_manager.path_idx >= 1
-        collision_done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        #die = path_done | collision_done
+        # Collision = any lidar ray below threshold (no ContactSensor/PhysX API needed).
+        if self._latest_lidar_ranges_m is not None:
+            min_range = self._latest_lidar_ranges_m.min(dim=1)[0]
+            collision_done = min_range < self.cfg.collision_robot_radius
+        else:
+            collision_done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         die = collision_done
         return die, time_out
 
@@ -352,9 +355,10 @@ class PirlEnv(DirectRLEnv):
         self.lidar.reset(env_ids_seq)
         # Reset grid history
         self.costmap.reset(env_ids_seq)
-        # Reset path points
+        # Reset path points (OBB-aware so segments avoid static DR obstacles).
         env_origins = self.scene.env_origins[env_ids_t, :2]
-        self.path_manager.reset(env_ids_seq, env_origins)
+        obstacle_obbs_per_env = self.dr_obstacles.get_obstacle_obbs(env_ids_t)
+        self.path_manager.reset(env_ids_seq, env_origins, obstacle_obbs_per_env=obstacle_obbs_per_env)
         # Reset progress tracking
         robot_pos_w = self.robot.data.root_pos_w[env_ids_t, :2]
         curr_idx = self.path_manager.path_idx[env_ids_t]

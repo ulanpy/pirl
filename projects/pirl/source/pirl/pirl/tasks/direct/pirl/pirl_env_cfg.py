@@ -52,8 +52,16 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Fewer points spaced ~2 m apart so waypoint bonus is rarer and robot does not abuse it over obstacle avoidance.
     path_num_points = 4  # waypoints along path (spaced ~2 m)
     path_segment_len = 5  # points provided to policy
-    path_radius_range = (0.6, 6.0)  # path from 0.6 m to 6 m from env origin → ~2 m between consecutive waypoints
-    path_goal_threshold = 0.4  # distance to count waypoint as reached (slightly larger for 2 m spacing)
+    path_radius_range = (0.6, 6.0)  # path from 0.6 m to 6 m from env origin
+    path_goal_threshold = 0.4  # distance to count waypoint as reached
+    # Curvature (ROS2-like local path: not a straight line).
+    path_heading_noise_scale = 0.35  # rad per step; larger → more turns
+    path_mid_turn_rad = 0.5  # extra turn in second half of path (rad), ±random
+    # Obstacle-aware local path generation (OBB-based; closer to ROS2 controller constraints).
+    path_obb_margin = 0.25  # inflate each obstacle OBB by this margin (m)
+    path_segment_check_step = 0.12  # sample step along each segment for collision check (m)
+    path_step_max_resample = 20  # attempts for each waypoint before fallback
+    path_obstacle_max_resample = 8  # full-path retries if a difficult env still collides
     observation_space = gym.spaces.Dict(
         {
             "vec": gym.spaces.Box(
@@ -84,13 +92,13 @@ class PirlEnvCfg(DirectRLEnvCfg):
     )
     # Per-episode static obstacle randomization inside the warehouse.
     dr_obstacle_usd_paths: tuple[str, ...] = (
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Props/Forklift/forklift.usd",
+        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Props/Forklift/forklift.usd",
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLarge_A5.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A7.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A5.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A4.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_RackFrame_03.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_RackShelf_01.usd",
+        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A7.usd",
+        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A5.usd",
+        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A4.usd",
+        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_RackFrame_03.usd",
+        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_RackShelf_01.usd",
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_PaletteA_01.usd",
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_PaletteA_02.usd",
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxC_01.usd",
@@ -98,13 +106,34 @@ class PirlEnvCfg(DirectRLEnvCfg):
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/S_TrafficCone.usd",
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/S_WetFloorSign.usd",
     )
-    dr_obstacle_slot_count = 24
-    dr_obstacle_count_range = (8, 18)
-    dr_obstacle_xy_range = ((-10.0, 10.0), (-10.0, 10.0))
-    dr_obstacle_keepout_radius = 1.8
+    # Keep local obstacle density high while reducing total prim count.
+    dr_obstacle_slot_count = 18
+    dr_obstacle_count_range = (10, 18)
+    dr_obstacle_xy_range = ((-6.0, 6.0), (-6.0, 6.0))
+    dr_obstacle_keepout_radius = 1.0
     dr_obstacle_min_separation = 2.0
     dr_obstacle_max_sample_tries = 40
+    # OBB footprint per DR asset for path planning (final meters after any scale).
+    dr_obstacle_default_half_extents_xy = (0.45, 0.30)
+    dr_obstacle_half_extents_safety_scale = 1.15
+    dr_obstacle_half_extents_xy_overrides: tuple[tuple[str, tuple[float, float]], ...] = (
+        ("RackLarge_A5.usd", (1.05, 0.52)),
+        ("SM_PaletteA_01.usd", (0.62, 0.52)),
+        ("SM_PaletteA_02.usd", (0.62, 0.52)),
+        ("SM_CardBoxC_01.usd", (0.35, 0.28)),
+        ("SM_CardBoxD_02.usd", (0.42, 0.32)),
+        ("S_TrafficCone.usd", (0.18, 0.18)),
+        ("S_WetFloorSign.usd", (0.25, 0.16)),
+        ("forklift.usd", (1.15, 0.62)),
+    )
+    # Static obstacles baked into warehouse scene (not DR assets), referenced by prim name.
+    path_scene_static_obstacle_names: tuple[str, ...] = ("Forklift", "Forklift_01")
+    path_scene_static_obstacle_half_extents_xy_overrides: tuple[tuple[str, tuple[float, float]], ...] = (
+        ("Forklift", (1.15, 0.62)),
+        ("Forklift_01", (1.15, 0.62)),
+    )
     # Runtime dynamic obstacles (stable replacement for people in RL training).
+    # Runtime moving XForm obstacles are expensive for ray-caster tracking in headless mode.
     dyn_obstacle_enabled = True
     # Variety of non-trivial props (chairs/storage/table) for lidar obstacle perception.
     # ArchVis assets are in centimeters; DynamicObstaclesManager scales them to meters.
@@ -118,14 +147,14 @@ class PirlEnvCfg(DirectRLEnvCfg):
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Seating/Stackable.usd",
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Seating/Caprice/Caprice_A.usd",
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Storage/Contemporary/Contemporary_StorageCube.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Storage/Standard/Standard_SmallUnit.usd",
+        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Storage/Standard/Standard_SmallUnit.usd",
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Tables/OakTableSmall.usd",
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Tables/Kettle.usd",
     )
     dyn_obstacle_slot_count = 16
     dyn_obstacle_count_range = (6, 12)
     dyn_obstacle_xy_range = ((-8.0, 8.0), (-8.0, 8.0))
-    dyn_obstacle_keepout_radius = 1.5
+    dyn_obstacle_keepout_radius = 1.0
     dyn_obstacle_min_separation = 1.5
     dyn_obstacle_max_sample_tries = 40
     dyn_obstacle_motion_radius_range = (0.4, 1.0)
@@ -173,7 +202,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
         ),
         # Slightly above real range to ease debugging
         max_distance=18.0,
-        debug_vis=True,
+        debug_vis=False,
         visualizer_cfg=RAY_CASTER_MARKER_CFG.replace(
             prim_path="/Visuals/LidarHits",
             markers={
@@ -186,7 +215,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     )
 
     # Multi-env scene; dynamic obstacles are created under each env namespace.
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=35.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=10, env_spacing=35.0, replicate_physics=True)
 
     # controllable joints (explicit left/right order)
     dof_names = ["left_wheel_joint", "right_wheel_joint"]
@@ -204,10 +233,10 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # small per-step penalty (must stay much smaller than goal bonus)
     rew_step_penalty = 0.0
     rew_scale_collision = -50.0
-    collision_robot_radius = 0.18
+    collision_robot_radius = 0.20  # slightly larger to keep collision signal aligned with proximity
     # Dense proximity penalty (exp-shaped); 0 with no obstacles.
     # Penalty activates when nearest obstacle in front sector is closer than this distance.
-    proximity_activation_distance = 0.8  # m
+    proximity_activation_distance = 0.9  # m
     # Larger value -> steeper growth as obstacle gets closer.
     proximity_exponential_rate = 2.0
     # FOV for proximity penalty. Set to 360 to cover all sides.

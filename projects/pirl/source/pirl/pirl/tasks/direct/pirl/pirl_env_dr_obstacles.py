@@ -28,13 +28,70 @@ class DomainRandomizationObstacles:
         self.device = device
         self.num_envs = num_envs
         self._obstacle_prims: list[list[SingleXFormPrim]] = []
+        self._scene_static_prims: list[list[tuple[SingleXFormPrim, float, float]]] = [
+            [] for _ in range(num_envs)
+        ]
+        self._slot_asset_paths: list[str] = []
+        self._slot_half_extents_xy: list[tuple[float, float]] = []
+        self._scene_static_names: tuple[str, ...] = tuple(
+            getattr(self.cfg, "path_scene_static_obstacle_names", ())
+        )
+        # World XY of placed obstacles per env (after each reset), for path generation.
+        self._last_obstacle_xy: list[list[tuple[float, float]]] = [[] for _ in range(num_envs)]
+        # World-frame OBB list per env: (x, y, yaw, hx, hy).
+        self._last_obstacle_obb: list[list[tuple[float, float, float, float, float]]] = [
+            [] for _ in range(num_envs)
+        ]
+
+    def _half_extents_from_asset(self, asset_path: str) -> tuple[float, float]:
+        default_hx, default_hy = getattr(
+            self.cfg, "dr_obstacle_default_half_extents_xy", (0.45, 0.30)
+        )
+        safety_scale = float(getattr(self.cfg, "dr_obstacle_half_extents_safety_scale", 1.0))
+        overrides = dict(getattr(self.cfg, "dr_obstacle_half_extents_xy_overrides", ()))
+        for key, ext in overrides.items():
+            if key in asset_path:
+                return float(ext[0]) * safety_scale, float(ext[1]) * safety_scale
+        return float(default_hx) * safety_scale, float(default_hy) * safety_scale
+
+    def _half_extents_from_scene_name(self, prim_name: str) -> tuple[float, float]:
+        default_hx, default_hy = getattr(
+            self.cfg, "dr_obstacle_default_half_extents_xy", (0.45, 0.30)
+        )
+        overrides = dict(
+            getattr(self.cfg, "path_scene_static_obstacle_half_extents_xy_overrides", ())
+        )
+        if prim_name in overrides:
+            ext = overrides[prim_name]
+            return float(ext[0]), float(ext[1])
+        return float(default_hx), float(default_hy)
+
+    @staticmethod
+    def _yaw_from_quat_wxyz(quat_wxyz) -> float:
+        w = float(quat_wxyz[0])
+        x = float(quat_wxyz[1])
+        y = float(quat_wxyz[2])
+        z = float(quat_wxyz[3])
+        return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
     def setup(self) -> None:
         """Create obstacle slots (one prim per env per slot). Call after clone_environments."""
         self._obstacle_prims = []
+        self._scene_static_prims = [[] for _ in range(self.num_envs)]
+        self._slot_asset_paths = []
+        self._slot_half_extents_xy = []
+        for env_id in range(self.num_envs):
+            for prim_name in self._scene_static_names:
+                prim_path = f"/World/envs/env_{env_id}/GeneratedScene/{prim_name}"
+                try:
+                    prim = SingleXFormPrim(prim_path, reset_xform_properties=False)
+                    # Validate prim exists in scene by querying pose once.
+                    prim.get_world_pose()
+                    hx, hy = self._half_extents_from_scene_name(prim_name)
+                    self._scene_static_prims[env_id].append((prim, hx, hy))
+                except Exception:
+                    continue
         asset_paths = tuple(getattr(self.cfg, "dr_obstacle_usd_paths", ()))
-        if len(asset_paths) == 0:
-            return
 
         hidden_pos = (0.0, 0.0, -15.0)
         identity_quat = (1.0, 0.0, 0.0, 0.0)
@@ -48,6 +105,8 @@ class DomainRandomizationObstacles:
 
         max_slots = int(getattr(self.cfg, "dr_obstacle_slot_count", 0))
         for slot_idx in range(max_slots):
+            if len(asset_paths) == 0:
+                break
             asset_path = asset_paths[slot_idx % len(asset_paths)]
             scale = scale_from_asset_path(asset_path)
             created_paths: list[str] = []
@@ -79,6 +138,8 @@ class DomainRandomizationObstacles:
                         pass
                 continue
             self._obstacle_prims.append(slot_prims)
+            self._slot_asset_paths.append(asset_path)
+            self._slot_half_extents_xy.append(self._half_extents_from_asset(asset_path))
 
     def reset(
         self,
@@ -86,8 +147,6 @@ class DomainRandomizationObstacles:
         env_origins: torch.Tensor,
     ) -> None:
         """Hide all slots for env_ids, then place a random subset with valid poses."""
-        if len(self._obstacle_prims) == 0:
-            return
         if len(env_ids) == 0:
             return
 
@@ -118,6 +177,7 @@ class DomainRandomizationObstacles:
             perm = torch.randperm(len(self._obstacle_prims), device=self.device).tolist()
 
             placed_xy: list[tuple[float, float]] = []
+            placed_obb: list[tuple[float, float, float, float, float]] = []
             activated = 0
             for slot_idx in perm:
                 if activated >= active_count:
@@ -157,4 +217,59 @@ class DomainRandomizationObstacles:
                 prim.set_world_pose(position=world_pos, orientation=quat_wxyz)
                 prim.set_visibility(True)
                 placed_xy.append((cand_x, cand_y))
+                hx, hy = self._slot_half_extents_xy[slot_idx]
+                placed_obb.append(
+                    (float(world_pos[0]), float(world_pos[1]), float(yaw), float(hx), float(hy))
+                )
                 activated += 1
+
+            self._last_obstacle_xy[env_id] = [
+                (float(origin[0]) + x, float(origin[1]) + y) for (x, y) in placed_xy
+            ]
+            if len(self._scene_static_prims[env_id]) == 0:
+                for prim_name in self._scene_static_names:
+                    prim_path = f"/World/envs/env_{env_id}/GeneratedScene/{prim_name}"
+                    try:
+                        prim = SingleXFormPrim(prim_path, reset_xform_properties=False)
+                        prim.get_world_pose()
+                        hx, hy = self._half_extents_from_scene_name(prim_name)
+                        self._scene_static_prims[env_id].append((prim, hx, hy))
+                    except Exception:
+                        continue
+            for static_prim, hx, hy in self._scene_static_prims[env_id]:
+                try:
+                    world_pos, world_quat = static_prim.get_world_pose()
+                    static_x = float(world_pos[0])
+                    static_y = float(world_pos[1])
+                    static_yaw = self._yaw_from_quat_wxyz(world_quat)
+                    self._last_obstacle_xy[env_id].append((static_x, static_y))
+                    placed_obb.append((static_x, static_y, static_yaw, float(hx), float(hy)))
+                except Exception:
+                    continue
+            self._last_obstacle_obb[env_id] = placed_obb
+
+    def get_obstacle_positions_xy(
+        self, env_ids: Sequence[int] | torch.Tensor
+    ) -> list[torch.Tensor]:
+        """Return world XY of placed obstacles for each env (for path generation)."""
+        if isinstance(env_ids, torch.Tensor):
+            env_ids = env_ids.tolist()
+        return [
+            torch.tensor(self._last_obstacle_xy[e], device=self.device, dtype=torch.float32)
+            if self._last_obstacle_xy[e]
+            else torch.zeros(0, 2, device=self.device)
+            for e in env_ids
+        ]
+
+    def get_obstacle_obbs(
+        self, env_ids: Sequence[int] | torch.Tensor
+    ) -> list[torch.Tensor]:
+        """Return obstacle OBBs in world frame for each env as (N, 5): x, y, yaw, hx, hy."""
+        if isinstance(env_ids, torch.Tensor):
+            env_ids = env_ids.tolist()
+        return [
+            torch.tensor(self._last_obstacle_obb[e], device=self.device, dtype=torch.float32)
+            if self._last_obstacle_obb[e]
+            else torch.zeros(0, 5, device=self.device)
+            for e in env_ids
+        ]
