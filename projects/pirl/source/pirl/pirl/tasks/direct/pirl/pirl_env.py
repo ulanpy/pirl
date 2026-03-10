@@ -221,23 +221,36 @@ class PirlEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
             # 1. Вычисляем отдельные компоненты
-            # Прогресс к цели (только поощряем приближение; отдаление/смена waypoint не штрафуем)
-            progress_val = torch.clamp(
-                self.prev_target_dist - self.curr_target_dist, min=0.0
-            ) * self.cfg.rew_scale_progress
+            # Прогресс к цели: поощряем приближение и слабо штрафуем регресс (anti-spin).
+            delta_dist = self.prev_target_dist - self.curr_target_dist
+            progress_val = torch.clamp(delta_dist, min=0.0) * float(self.cfg.rew_scale_progress)
+            progress_clip = float(getattr(self.cfg, "rew_progress_clip", 0.10))
+            if progress_clip > 0.0:
+                progress_val = torch.clamp(progress_val, max=progress_clip)
+            regress_val = torch.clamp(-delta_dist, min=0.0) * float(getattr(self.cfg, "rew_scale_regress", 0.0))
+            regress_clip = float(getattr(self.cfg, "rew_regress_clip", 0.05))
+            if regress_clip > 0.0:
+                regress_val = torch.clamp(regress_val, min=-regress_clip, max=0.0)
             
             # Направление движения (keep shape [num_envs, 1] for reward sum and memory)
             heading_val = (self.dot * self.cfg.rew_scale_heading)
+            heading_clip = float(getattr(self.cfg, "rew_heading_clip", 0.02))
+            if heading_clip > 0.0:
+                heading_val = torch.clamp(heading_val, min=-heading_clip, max=heading_clip)
 
             # Штраф за скорость изменения yaw-команды [num_envs, 1]
             yaw_delta = self.actions[:, 1:2] - self.prev_actions[:, 1:2]
             rew_action_rate = self.cfg.rew_scale_action_rate * torch.square(yaw_delta)
+            action_rate_cap = float(getattr(self.cfg, "rew_action_rate_max_penalty", 0.01))
+            if action_rate_cap > 0.0:
+                rew_action_rate = torch.clamp(rew_action_rate, min=-action_rate_cap, max=0.0)
             
             # Штраф за близость (proximity)
             proximity_val = self.proximity.compute_penalty(self._latest_lidar_ranges_m)
             # Штраф за скорость сближения с препятствием (dd/dt), активен только в ближней зоне.
             if self._latest_lidar_ranges_m is None:
                 rew_proximity_rate = torch.zeros((self.num_envs, 1), device=self.device)
+                collision_done = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
             else:
                 curr_min_prox_range = self.proximity.min_selected_range(self._latest_lidar_ranges_m)
                 dt_env = self.cfg.sim.dt * self.cfg.decimation
@@ -248,19 +261,26 @@ class PirlEnv(DirectRLEnv):
                 rew_proximity_rate = (
                     float(self.cfg.rew_scale_proximity_rate) * closing_speed * gate.float()
                 )
+                collision_done = self._latest_lidar_ranges_m.min(dim=1)[0] < float(self.cfg.collision_robot_radius)
+            prox_rate_cap = float(getattr(self.cfg, "rew_proximity_rate_max_penalty", 0.03))
+            if prox_rate_cap > 0.0:
+                rew_proximity_rate = torch.clamp(rew_proximity_rate, min=-prox_rate_cap, max=0.0)
             
             # Бонус за достижение точки пути
             reached_goal = self.path_manager.path_idx > self.prev_path_idx
             goal_bonus_val = reached_goal.unsqueeze(dim=-1).float() * self.cfg.rew_goal_bonus
             
-            # Collision reward (no obstacles in empty scene → always 0)
-            collision_val = torch.zeros((self.num_envs, 1), device=self.device)
+            # Явный collision penalty для корректного credit assignment.
+            collision_val = collision_done.unsqueeze(-1).float() * float(self.cfg.rew_scale_collision)
 
             # Скорость и реверс
             forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
             reverse_val = torch.zeros_like(forward_speed)
             if self.cfg.rew_scale_reverse != 0:
                 reverse_val = float(self.cfg.rew_scale_reverse) * torch.clamp(-forward_speed, min=0.0)
+            reverse_cap = float(getattr(self.cfg, "rew_reverse_max_penalty", 0.10))
+            if reverse_cap > 0.0:
+                reverse_val = torch.clamp(reverse_val, min=-reverse_cap, max=0.0)
                 
             # Постоянный штраф за время
             step_penalty_val = torch.full_like(forward_speed, self.cfg.rew_step_penalty)
@@ -268,6 +288,7 @@ class PirlEnv(DirectRLEnv):
             # 2. Итоговая награда
             reward = (
                 progress_val + 
+                regress_val +
                 proximity_val + 
                 goal_bonus_val + 
                 collision_val + 
@@ -290,6 +311,7 @@ class PirlEnv(DirectRLEnv):
                 self.extras["log"] = {}
             
             self.extras["log"]["rew/progress"] = torch.mean(progress_val)
+            self.extras["log"]["rew/regress"] = torch.mean(regress_val)
             self.extras["log"]["rew/proximity"] = torch.mean(proximity_val)
             self.extras["log"]["rew/goal_bonus"] = torch.mean(goal_bonus_val)
             self.extras["log"]["rew/collision"] = torch.mean(collision_val)
@@ -299,6 +321,12 @@ class PirlEnv(DirectRLEnv):
             self.extras["log"]["rew/action_rate"] = torch.mean(rew_action_rate)
             self.extras["log"]["rew/proximity_rate"] = torch.mean(rew_proximity_rate)
             self.extras["log"]["rew/total"] = torch.mean(reward)
+            # Relative contribution diagnostics: helps validate reward balance numerically.
+            denom = torch.mean(torch.abs(reward)) + 1e-6
+            self.extras["log"]["rew_ratio/action_rate"] = torch.mean(torch.abs(rew_action_rate)) / denom
+            self.extras["log"]["rew_ratio/proximity_rate"] = torch.mean(torch.abs(rew_proximity_rate)) / denom
+            self.extras["log"]["rew_ratio/progress"] = torch.mean(torch.abs(progress_val)) / denom
+            self.extras["log"]["rew_ratio/goal_bonus"] = torch.mean(torch.abs(goal_bonus_val)) / denom
 
             return reward
 

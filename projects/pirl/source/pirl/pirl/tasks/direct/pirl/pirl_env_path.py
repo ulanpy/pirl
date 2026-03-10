@@ -145,10 +145,15 @@ class LocalPathManager:
         max_resample = int(getattr(self.cfg, "path_obstacle_max_resample", 12))
         env_origins_sub = self._extract_env_origins_xy(env_ids, env_origins)
 
-        empty_obbs = [torch.zeros(0, 5, device=self.device) for _ in range(n)]
-        obstacles = obstacle_obbs_per_env if obstacle_obbs_per_env is not None else empty_obbs
-        if len(obstacles) != n:
-            obstacles = empty_obbs
+        if obstacle_obbs_per_env is None:
+            obstacles = [torch.zeros(0, 5, device=self.device) for _ in range(n)]
+        else:
+            if len(obstacle_obbs_per_env) != n:
+                raise ValueError(
+                    f"obstacle_obbs_per_env length {len(obstacle_obbs_per_env)} "
+                    f"must match number of reset envs {n}."
+                )
+            obstacles = obstacle_obbs_per_env
 
         path_points = torch.zeros((n, self.cfg.path_num_points, 2), device=self.device)
         obb_margin = float(getattr(self.cfg, "path_obb_margin", 0.25))
