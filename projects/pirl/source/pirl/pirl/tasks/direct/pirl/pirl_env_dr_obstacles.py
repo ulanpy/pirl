@@ -31,13 +31,10 @@ class DomainRandomizationObstacles:
         self._scene_static_prims: list[list[tuple[SingleXFormPrim, float, float]]] = [
             [] for _ in range(num_envs)
         ]
-        self._slot_asset_paths: list[str] = []
         self._slot_half_extents_xy: list[tuple[float, float]] = []
         self._scene_static_names: tuple[str, ...] = tuple(
             getattr(self.cfg, "path_scene_static_obstacle_names", ())
         )
-        # World XY of placed obstacles per env (after each reset), for path generation.
-        self._last_obstacle_xy: list[list[tuple[float, float]]] = [[] for _ in range(num_envs)]
         # World-frame OBB list per env: (x, y, yaw, hx, hy).
         self._last_obstacle_obb: list[list[tuple[float, float, float, float, float]]] = [
             [] for _ in range(num_envs)
@@ -78,7 +75,6 @@ class DomainRandomizationObstacles:
         """Create obstacle slots (one prim per env per slot). Call after clone_environments."""
         self._obstacle_prims = []
         self._scene_static_prims = [[] for _ in range(self.num_envs)]
-        self._slot_asset_paths = []
         self._slot_half_extents_xy = []
         for env_id in range(self.num_envs):
             for prim_name in self._scene_static_names:
@@ -92,6 +88,8 @@ class DomainRandomizationObstacles:
                 except Exception:
                     continue
         asset_paths = tuple(getattr(self.cfg, "dr_obstacle_usd_paths", ()))
+        if len(asset_paths) == 0:
+            return
 
         hidden_pos = (0.0, 0.0, -15.0)
         identity_quat = (1.0, 0.0, 0.0, 0.0)
@@ -105,8 +103,6 @@ class DomainRandomizationObstacles:
 
         max_slots = int(getattr(self.cfg, "dr_obstacle_slot_count", 0))
         for slot_idx in range(max_slots):
-            if len(asset_paths) == 0:
-                break
             asset_path = asset_paths[slot_idx % len(asset_paths)]
             scale = scale_from_asset_path(asset_path)
             created_paths: list[str] = []
@@ -138,7 +134,6 @@ class DomainRandomizationObstacles:
                         pass
                 continue
             self._obstacle_prims.append(slot_prims)
-            self._slot_asset_paths.append(asset_path)
             self._slot_half_extents_xy.append(self._half_extents_from_asset(asset_path))
 
     def reset(
@@ -176,7 +171,7 @@ class DomainRandomizationObstacles:
             active_count = min(active_count, len(self._obstacle_prims))
             perm = torch.randperm(len(self._obstacle_prims), device=self.device).tolist()
 
-            placed_xy: list[tuple[float, float]] = []
+            sampled_xy: list[tuple[float, float]] = []
             placed_obb: list[tuple[float, float, float, float, float]] = []
             activated = 0
             for slot_idx in perm:
@@ -195,7 +190,7 @@ class DomainRandomizationObstacles:
                         continue
                     too_close = any(
                         (cand_x - px) ** 2 + (cand_y - py) ** 2 < (min_sep * min_sep)
-                        for px, py in placed_xy
+                        for px, py in sampled_xy
                     )
                     if not too_close:
                         sample_ok = True
@@ -216,16 +211,13 @@ class DomainRandomizationObstacles:
                 prim = self._obstacle_prims[slot_idx][env_id]
                 prim.set_world_pose(position=world_pos, orientation=quat_wxyz)
                 prim.set_visibility(True)
-                placed_xy.append((cand_x, cand_y))
+                sampled_xy.append((cand_x, cand_y))
                 hx, hy = self._slot_half_extents_xy[slot_idx]
                 placed_obb.append(
                     (float(world_pos[0]), float(world_pos[1]), float(yaw), float(hx), float(hy))
                 )
                 activated += 1
 
-            self._last_obstacle_xy[env_id] = [
-                (float(origin[0]) + x, float(origin[1]) + y) for (x, y) in placed_xy
-            ]
             if len(self._scene_static_prims[env_id]) == 0:
                 for prim_name in self._scene_static_names:
                     prim_path = f"/World/envs/env_{env_id}/GeneratedScene/{prim_name}"
@@ -242,24 +234,10 @@ class DomainRandomizationObstacles:
                     static_x = float(world_pos[0])
                     static_y = float(world_pos[1])
                     static_yaw = self._yaw_from_quat_wxyz(world_quat)
-                    self._last_obstacle_xy[env_id].append((static_x, static_y))
                     placed_obb.append((static_x, static_y, static_yaw, float(hx), float(hy)))
                 except Exception:
                     continue
             self._last_obstacle_obb[env_id] = placed_obb
-
-    def get_obstacle_positions_xy(
-        self, env_ids: Sequence[int] | torch.Tensor
-    ) -> list[torch.Tensor]:
-        """Return world XY of placed obstacles for each env (for path generation)."""
-        if isinstance(env_ids, torch.Tensor):
-            env_ids = env_ids.tolist()
-        return [
-            torch.tensor(self._last_obstacle_xy[e], device=self.device, dtype=torch.float32)
-            if self._last_obstacle_xy[e]
-            else torch.zeros(0, 2, device=self.device)
-            for e in env_ids
-        ]
 
     def get_obstacle_obbs(
         self, env_ids: Sequence[int] | torch.Tensor
