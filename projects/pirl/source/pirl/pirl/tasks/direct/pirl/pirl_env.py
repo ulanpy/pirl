@@ -48,6 +48,10 @@ class PirlEnv(DirectRLEnv):
         self.prev_min_prox_range = torch.full(
             (self.num_envs, 1), float(self.cfg.lidar.max_distance), device=self.device
         )
+        # Cached static obstacle OBBs per env: tensor shape (N, 5) with columns (x, y, yaw, hx, hy).
+        self._static_obstacle_obbs: list[torch.Tensor] = [
+            torch.zeros(0, 5, device=self.device) for _ in range(self.num_envs)
+        ]
         # IRA setup deferred to first reset() so NavMesh bakes after sim has run and scene is composed.
 
     def _setup_scene(self):
@@ -161,6 +165,26 @@ class PirlEnv(DirectRLEnv):
 
         self.lidar._debug_vis_callback = _safe_debug_callback
 
+    def _static_obb_collision(self, robot_pos_w_xy: torch.Tensor) -> torch.Tensor:
+        """Collision with cached static OBBs (DR + baked scene obstacles)."""
+        collision = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        robot_radius = float(self.cfg.collision_robot_radius)
+        for env_id in range(self.num_envs):
+            obbs = self._static_obstacle_obbs[env_id]
+            if obbs.numel() == 0:
+                continue
+            rel = robot_pos_w_xy[env_id].unsqueeze(0) - obbs[:, :2]  # (N, 2)
+            cos_yaw = torch.cos(obbs[:, 2])
+            sin_yaw = torch.sin(obbs[:, 2])
+            local_x = rel[:, 0] * cos_yaw + rel[:, 1] * sin_yaw
+            local_y = -rel[:, 0] * sin_yaw + rel[:, 1] * cos_yaw
+            inside = (torch.abs(local_x) <= (obbs[:, 3] + robot_radius)) & (
+                torch.abs(local_y) <= (obbs[:, 4] + robot_radius)
+            )
+            if bool(inside.any().item()):
+                collision[env_id] = True
+        return collision
+
     def _apply_action(self) -> None:
         # Map normalized actions to cmd_vel, then to wheel angular speeds
         v = self.actions[:, 0] * self.cfg.max_lin_vel
@@ -224,33 +248,21 @@ class PirlEnv(DirectRLEnv):
             # Прогресс к цели: поощряем приближение и слабо штрафуем регресс (anti-spin).
             delta_dist = self.prev_target_dist - self.curr_target_dist
             progress_val = torch.clamp(delta_dist, min=0.0) * float(self.cfg.rew_scale_progress)
-            progress_clip = float(getattr(self.cfg, "rew_progress_clip", 0.10))
-            if progress_clip > 0.0:
-                progress_val = torch.clamp(progress_val, max=progress_clip)
             regress_val = torch.clamp(-delta_dist, min=0.0) * float(getattr(self.cfg, "rew_scale_regress", 0.0))
-            regress_clip = float(getattr(self.cfg, "rew_regress_clip", 0.05))
-            if regress_clip > 0.0:
-                regress_val = torch.clamp(regress_val, min=-regress_clip, max=0.0)
             
             # Направление движения (keep shape [num_envs, 1] for reward sum and memory)
             heading_val = (self.dot * self.cfg.rew_scale_heading)
-            heading_clip = float(getattr(self.cfg, "rew_heading_clip", 0.02))
-            if heading_clip > 0.0:
-                heading_val = torch.clamp(heading_val, min=-heading_clip, max=heading_clip)
 
             # Штраф за скорость изменения yaw-команды [num_envs, 1]
             yaw_delta = self.actions[:, 1:2] - self.prev_actions[:, 1:2]
             rew_action_rate = self.cfg.rew_scale_action_rate * torch.square(yaw_delta)
-            action_rate_cap = float(getattr(self.cfg, "rew_action_rate_max_penalty", 0.01))
-            if action_rate_cap > 0.0:
-                rew_action_rate = torch.clamp(rew_action_rate, min=-action_rate_cap, max=0.0)
             
             # Штраф за близость (proximity)
             proximity_val = self.proximity.compute_penalty(self._latest_lidar_ranges_m)
             # Штраф за скорость сближения с препятствием (dd/dt), активен только в ближней зоне.
             if self._latest_lidar_ranges_m is None:
                 rew_proximity_rate = torch.zeros((self.num_envs, 1), device=self.device)
-                collision_done = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+                lidar_collision_done = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
             else:
                 curr_min_prox_range = self.proximity.min_selected_range(self._latest_lidar_ranges_m)
                 dt_env = self.cfg.sim.dt * self.cfg.decimation
@@ -261,10 +273,11 @@ class PirlEnv(DirectRLEnv):
                 rew_proximity_rate = (
                     float(self.cfg.rew_scale_proximity_rate) * closing_speed * gate.float()
                 )
-                collision_done = self._latest_lidar_ranges_m.min(dim=1)[0] < float(self.cfg.collision_robot_radius)
-            prox_rate_cap = float(getattr(self.cfg, "rew_proximity_rate_max_penalty", 0.03))
-            if prox_rate_cap > 0.0:
-                rew_proximity_rate = torch.clamp(rew_proximity_rate, min=-prox_rate_cap, max=0.0)
+                lidar_collision_done = (
+                    self._latest_lidar_ranges_m.min(dim=1)[0] < float(self.cfg.collision_robot_radius)
+                )
+            obb_collision_done = self._static_obb_collision(self.robot.data.root_pos_w[:, :2])
+            collision_done = lidar_collision_done | obb_collision_done
             
             # Бонус за достижение точки пути
             reached_goal = self.path_manager.path_idx > self.prev_path_idx
@@ -278,9 +291,6 @@ class PirlEnv(DirectRLEnv):
             reverse_val = torch.zeros_like(forward_speed)
             if self.cfg.rew_scale_reverse != 0:
                 reverse_val = float(self.cfg.rew_scale_reverse) * torch.clamp(-forward_speed, min=0.0)
-            reverse_cap = float(getattr(self.cfg, "rew_reverse_max_penalty", 0.10))
-            if reverse_cap > 0.0:
-                reverse_val = torch.clamp(reverse_val, min=-reverse_cap, max=0.0)
                 
             # Постоянный штраф за время
             step_penalty_val = torch.full_like(forward_speed, self.cfg.rew_step_penalty)
@@ -335,10 +345,32 @@ class PirlEnv(DirectRLEnv):
         # Collision = any lidar ray below threshold (no ContactSensor/PhysX API needed).
         if self._latest_lidar_ranges_m is not None:
             min_range = self._latest_lidar_ranges_m.min(dim=1)[0]
-            collision_done = min_range < self.cfg.collision_robot_radius
+            lidar_collision_done = min_range < self.cfg.collision_robot_radius
         else:
-            collision_done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        die = collision_done
+            lidar_collision_done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        obb_collision_done = self._static_obb_collision(self.robot.data.root_pos_w[:, :2])
+        collision_done = lidar_collision_done | obb_collision_done
+        # Success termination: final waypoint reached.
+        last_idx = self.cfg.path_num_points - 1
+        at_final_waypoint = self.path_manager.path_idx >= last_idx
+        if hasattr(self, "curr_target_dist"):
+            final_reached = at_final_waypoint & (
+                self.curr_target_dist.squeeze(-1) < float(self.cfg.path_goal_threshold)
+            )
+        else:
+            # Fallback for startup ordering (should rarely trigger).
+            robot_pos_w = self.robot.data.root_pos_w[:, :2]
+            curr_idx = torch.clamp(self.path_manager.path_idx, max=last_idx)
+            curr_targets_w = self.path_manager.path_points_w[
+                torch.arange(self.num_envs, device=self.device), curr_idx
+            ]
+            dist = torch.linalg.norm(curr_targets_w - robot_pos_w, dim=-1)
+            final_reached = at_final_waypoint & (dist < float(self.cfg.path_goal_threshold))
+        die = collision_done | final_reached
+        if "log" not in self.extras:
+            self.extras["log"] = {}
+        self.extras["log"]["term/success"] = final_reached.float().mean()
+        self.extras["log"]["term/collision"] = collision_done.float().mean()
         return die, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -386,6 +418,8 @@ class PirlEnv(DirectRLEnv):
         # Reset path points (OBB-aware so segments avoid static DR obstacles).
         env_origins = self.scene.env_origins[env_ids_t, :2]
         obstacle_obbs_per_env = self.dr_obstacles.get_obstacle_obbs(env_ids_t)
+        for i, env_id in enumerate(env_ids_seq):
+            self._static_obstacle_obbs[int(env_id)] = obstacle_obbs_per_env[i]
         self.path_manager.reset(env_ids_seq, env_origins, obstacle_obbs_per_env=obstacle_obbs_per_env)
         # Reset progress tracking
         robot_pos_w = self.robot.data.root_pos_w[env_ids_t, :2]

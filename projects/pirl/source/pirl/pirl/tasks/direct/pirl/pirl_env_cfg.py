@@ -228,9 +228,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     
     # reward progress toward current path point
     rew_scale_progress = 10.0
-    rew_progress_clip = 0.10  # cap positive progress reward per step
     rew_scale_regress = -2.0  # penalize moving away from current waypoint (anti-spin)
-    rew_regress_clip = 0.05   # cap regression penalty magnitude per step
     # one-time bonus when reaching each path point
     rew_goal_bonus = 10.0
     # small per-step penalty (must stay much smaller than goal bonus)
@@ -248,17 +246,13 @@ class PirlEnvCfg(DirectRLEnvCfg):
     rew_proximity_max_penalty = -0.05
     # Additional penalty on positive closing speed (m/s) near obstacles.
     rew_scale_proximity_rate = -0.05
-    rew_proximity_rate_max_penalty = 0.03
     # Apply proximity-rate penalty only when nearest range is below this distance.
     proximity_rate_gate_distance = 1.2
     # Optional anti-reverse shaping (0 disables). Applies as: scale * relu(-forward_speed).
     rew_scale_reverse = -0.5
-    rew_reverse_max_penalty = 0.10
     rew_scale_heading = 0.01
-    rew_heading_clip = 0.02
     # Penalty for yaw-command jitter (squared difference of normalized yaw action)
     rew_scale_action_rate = -0.08
-    rew_action_rate_max_penalty = 0.01
 
     robot_spawn_radius = 0.5
     spawn_angle_range: tuple[float, float] | None = (math.pi * 0.5, math.pi * 1.5)
