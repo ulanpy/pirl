@@ -12,14 +12,30 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                 lname = name.lower()
 
                 # Explicit custom component registry (hardcoded on purpose).
-                from .ppo_dynamics_aux import PPODynamicsAux, PPODynamicsAux_default_config
+                from .ppo_dynamics_aux import PPODynamicsAuxRNN, PPODynamicsAux_default_config
+                from .recurrent_models import RecurrentDeterministicValue, RecurrentGaussianPolicy
                 custom_components = {
-                    "ppodynamicsaux": PPODynamicsAux,
+                    "ppodynamicsaux": PPODynamicsAuxRNN,
+                    "ppodynamicsauxrnn": PPODynamicsAuxRNN,
                     "ppodynamicsaux_default_config": PPODynamicsAux_default_config,
+                    "ppodynamicsauxrnn_default_config": PPODynamicsAux_default_config,
+                    "recurrentgaussianpolicy": RecurrentGaussianPolicy,
+                    "recurrentdeterministicvalue": RecurrentDeterministicValue,
                 }
                 if lname in custom_components:
                     return custom_components[lname]
                 return super()._component(name)
+
+            def _generate_models(self, env, cfg):
+                # Inject runtime num_envs into recurrent model specs so RNN states have correct shape.
+                models_cfg = cfg.get("models", {})
+                for role, role_cfg in models_cfg.items():
+                    if not isinstance(role_cfg, dict):
+                        continue
+                    model_class = str(role_cfg.get("class", "")).lower()
+                    if model_class in ["recurrentgaussianpolicy", "recurrentdeterministicvalue"]:
+                        role_cfg.setdefault("num_envs", env.num_envs)
+                return super()._generate_models(env, cfg)
 
             def _generate_agent(self, env, cfg, models):
                 agent_class_name = cfg.get("agent", {}).get("class", "")

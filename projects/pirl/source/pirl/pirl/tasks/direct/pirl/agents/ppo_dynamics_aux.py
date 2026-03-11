@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from skrl import config
-from skrl.agents.torch.ppo.ppo import PPO, PPO_DEFAULT_CONFIG
+from skrl.agents.torch.ppo.ppo_rnn import PPO_DEFAULT_CONFIG, PPO_RNN
 from skrl.resources.schedulers.torch import KLAdaptiveLR
 from skrl.utils.spaces.torch import compute_space_size
 
@@ -25,7 +25,7 @@ PPODynamicsAux_default_config = {
 }
 
 
-class PPODynamicsAux(PPO):
+class PPODynamicsAuxRNN(PPO_RNN):
     """PPO with auxiliary dynamics prediction head.
 
     The auxiliary task predicts delta of compact vec features:
@@ -105,9 +105,11 @@ class PPODynamicsAux(PPO):
         # Ensure next_states is stored in memory for dynamics supervision.
         if self.memory is not None:
             self.memory.create_tensor(name="next_states", size=self.observation_space, dtype=torch.float32)
+            if "next_states" not in self._tensors_names:
+                self._tensors_names.append("next_states")
 
     def _update(self, timestep: int, timesteps: int) -> None:
-        # Mostly identical to skrl PPO update, with + dynamics loss term.
+        # Mostly identical to skrl PPO_RNN update, with + dynamics loss term.
         def compute_gae(
             rewards: torch.Tensor,
             dones: torch.Tensor,
@@ -135,8 +137,9 @@ class PPODynamicsAux(PPO):
         # returns/advantages
         with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
             self.value.train(False)
+            rnn = {"rnn": self._rnn_initial_states["value"]} if self._rnn else {}
             last_values, _, _ = self.value.act(
-                {"states": self._state_preprocessor(self._current_next_states.float())}, role="value"
+                {"states": self._state_preprocessor(self._current_next_states.float()), **rnn}, role="value"
             )
             self.value.train(True)
             last_values = self._value_preprocessor(last_values, inverse=True)
@@ -156,9 +159,27 @@ class PPODynamicsAux(PPO):
         self.memory.set_tensor_by_name("advantages", advantages)
 
         sampled_batches = self.memory.sample_all(
-            names=["states", "actions", "log_prob", "values", "returns", "advantages", "next_states"],
+            names=[
+                "states",
+                "actions",
+                "terminated",
+                "truncated",
+                "log_prob",
+                "values",
+                "returns",
+                "advantages",
+                "next_states",
+            ],
             mini_batches=self._mini_batches,
+            sequence_length=self._rnn_sequence_length,
         )
+        rnn_policy, rnn_value = {}, {}
+        if self._rnn:
+            sampled_rnn_batches = self.memory.sample_all(
+                names=self._rnn_tensors_names,
+                mini_batches=self._mini_batches,
+                sequence_length=self._rnn_sequence_length,
+            )
 
         cumulative_policy_loss = 0.0
         cumulative_entropy_loss = 0.0
@@ -168,19 +189,45 @@ class PPODynamicsAux(PPO):
 
         for epoch in range(self._learning_epochs):
             kl_divergences = []
-            for (
+            for i, (
                 sampled_states_raw,
                 sampled_actions,
+                sampled_terminated,
+                sampled_truncated,
                 sampled_log_prob,
                 sampled_values,
                 sampled_returns,
                 sampled_advantages,
                 sampled_next_states_raw,
-            ) in sampled_batches:
+            ) in enumerate(sampled_batches):
+                if self._rnn:
+                    if self.policy is self.value:
+                        rnn_policy = {
+                            "rnn": [s.transpose(0, 1) for s in sampled_rnn_batches[i]],
+                            "terminated": sampled_terminated | sampled_truncated,
+                        }
+                        rnn_value = rnn_policy
+                    else:
+                        rnn_policy = {
+                            "rnn": [
+                                s.transpose(0, 1)
+                                for s, n in zip(sampled_rnn_batches[i], self._rnn_tensors_names)
+                                if "policy" in n
+                            ],
+                            "terminated": sampled_terminated | sampled_truncated,
+                        }
+                        rnn_value = {
+                            "rnn": [
+                                s.transpose(0, 1)
+                                for s, n in zip(sampled_rnn_batches[i], self._rnn_tensors_names)
+                                if "value" in n
+                            ],
+                            "terminated": sampled_terminated | sampled_truncated,
+                        }
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
                     sampled_states = self._state_preprocessor(sampled_states_raw, train=not epoch)
                     _, next_log_prob, _ = self.policy.act(
-                        {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
+                        {"states": sampled_states, "taken_actions": sampled_actions, **rnn_policy}, role="policy"
                     )
                     # Keep a differentiable path from aux dynamics loss to policy/backbone.
                     # We use the policy mean action as a gradient carrier while keeping forward
@@ -213,7 +260,7 @@ class PPODynamicsAux(PPO):
                     )
                     policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
 
-                    predicted_values, _, _ = self.value.act({"states": sampled_states}, role="value")
+                    predicted_values, _, _ = self.value.act({"states": sampled_states, **rnn_value}, role="value")
                     if self._clip_predicted_values:
                         predicted_values = sampled_values + torch.clip(
                             predicted_values - sampled_values, min=-self._value_clip, max=self._value_clip
@@ -303,3 +350,7 @@ class PPODynamicsAux(PPO):
         self.track_data("Policy / Standard deviation", self.policy.distribution(role="policy").stddev.mean().item())
         if self._learning_rate_scheduler:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
+
+
+# Backward-compatible alias for config/entry-points that still use old class name.
+PPODynamicsAux = PPODynamicsAuxRNN

@@ -252,7 +252,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     rew_scale_reverse = -0.5
     rew_scale_heading = 0.01
     # Penalty for yaw-command jitter (squared difference of normalized yaw action)
-    rew_scale_action_rate = -0.08
+    rew_scale_action_rate = 0.0 #-0.08
 
     robot_spawn_radius = 0.5
     spawn_angle_range: tuple[float, float] | None = (math.pi * 0.5, math.pi * 1.5)
