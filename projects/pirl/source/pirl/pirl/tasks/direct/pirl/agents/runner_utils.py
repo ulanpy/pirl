@@ -1,5 +1,5 @@
 import copy
-from typing import Any, Mapping, Union
+from typing import Any, Mapping, Union, cast
 
 from skrl.utils.runner.torch import Runner
 from skrl.envs.wrappers.torch import MultiAgentEnvWrapper, Wrapper
@@ -13,7 +13,11 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
 
                 # Explicit custom component registry (hardcoded on purpose).
                 from .ppo_dynamics_aux import PPODynamicsAuxRNN, PPODynamicsAux_default_config
-                from .recurrent_models import RecurrentDeterministicValue, RecurrentGaussianPolicy
+                from .recurrent_models import (
+                    RecurrentDeterministicValue,
+                    RecurrentGaussianPolicy,
+                    RecurrentSharedActorCritic,
+                )
                 custom_components = {
                     "ppodynamicsaux": PPODynamicsAuxRNN,
                     "ppodynamicsauxrnn": PPODynamicsAuxRNN,
@@ -21,6 +25,7 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                     "ppodynamicsauxrnn_default_config": PPODynamicsAux_default_config,
                     "recurrentgaussianpolicy": RecurrentGaussianPolicy,
                     "recurrentdeterministicvalue": RecurrentDeterministicValue,
+                    "recurrentsharedactorcritic": RecurrentSharedActorCritic,
                 }
                 if lname in custom_components:
                     return custom_components[lname]
@@ -33,11 +38,27 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                     if not isinstance(role_cfg, dict):
                         continue
                     model_class = str(role_cfg.get("class", "")).lower()
-                    if model_class in ["recurrentgaussianpolicy", "recurrentdeterministicvalue"]:
+                    if model_class in [
+                        "recurrentgaussianpolicy",
+                        "recurrentdeterministicvalue",
+                        "recurrentsharedactorcritic",
+                    ]:
                         role_cfg.setdefault("num_envs", env.num_envs)
-                return super()._generate_models(env, cfg)
+                models = cast(dict[str, dict[str, Any]], super()._generate_models(env, cfg))
+                # Optional hard sharing: if both roles use the shared recurrent class,
+                # force a single instance for policy and value.
+                policy_cfg = models_cfg.get("policy", {}) if isinstance(models_cfg, dict) else {}
+                value_cfg = models_cfg.get("value", {}) if isinstance(models_cfg, dict) else {}
+                p_class = str(policy_cfg.get("class", "")).lower()
+                v_class = str(value_cfg.get("class", "")).lower()
+                if p_class == "recurrentsharedactorcritic" and v_class == "recurrentsharedactorcritic":
+                    for agent_id in models:
+                        if "policy" in models[agent_id] and "value" in models[agent_id]:
+                            models[agent_id]["value"] = models[agent_id]["policy"]
+                return models
 
             def _generate_agent(self, env, cfg, models):
+                cfg = cast(dict[str, Any], copy.deepcopy(cfg))
                 agent_class_name = cfg.get("agent", {}).get("class", "")
                 
                 # Check if it's a standard skrl agent

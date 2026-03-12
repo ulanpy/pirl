@@ -4,4 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from .ppo_dynamics_aux import PPODynamicsAux, PPODynamicsAuxRNN, PPODynamicsAux_default_config
-from .recurrent_models import RecurrentDeterministicValue, RecurrentGaussianPolicy
+from .recurrent_models import (
+    RecurrentDeterministicValue,
+    RecurrentGaussianPolicy,
+    RecurrentSharedActorCritic,
+)

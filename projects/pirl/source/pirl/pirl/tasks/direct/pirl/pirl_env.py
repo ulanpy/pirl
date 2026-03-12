@@ -331,13 +331,6 @@ class PirlEnv(DirectRLEnv):
             self.extras["log"]["rew/action_rate"] = torch.mean(rew_action_rate)
             self.extras["log"]["rew/proximity_rate"] = torch.mean(rew_proximity_rate)
             self.extras["log"]["rew/total"] = torch.mean(reward)
-            # Action/kinematics diagnostics for spin analysis (independent of reward scales).
-            yaw_cmd = self.actions[:, 1:2]
-            self.extras["log"]["act/yaw_cmd_abs"] = torch.mean(torch.abs(yaw_cmd))
-            self.extras["log"]["act/yaw_cmd_delta_abs"] = torch.mean(torch.abs(yaw_delta))
-            self.extras["log"]["act/yaw_cmd_sat_ratio"] = torch.mean((torch.abs(yaw_cmd) > 0.95).float())
-            yaw_rate_abs = torch.abs(self.robot.data.root_com_ang_vel_b[:, 2:3])
-            self.extras["log"]["kin/yaw_rate_abs"] = torch.mean(yaw_rate_abs)
             # Relative contribution diagnostics: helps validate reward balance numerically.
             denom = torch.mean(torch.abs(reward)) + 1e-6
             self.extras["log"]["rew_ratio/action_rate"] = torch.mean(torch.abs(rew_action_rate)) / denom

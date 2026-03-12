@@ -6,20 +6,24 @@ seed: 42
 models:
   separate: True
   policy:
-    class: RecurrentGaussianPolicy
+    class: RecurrentSharedActorCritic
     clip_actions: False
     clip_log_std: True
     min_log_std: -20.0
     max_log_std: 2.0
-    initial_log_std: -1.0
-    sequence_length: 32
-    gru_hidden_size: 128
+    initial_log_std: -0.6
+    sequence_length: 64
+    gru_hidden_size: 256
     gru_num_layers: 1
   value:
-    class: RecurrentDeterministicValue
+    class: RecurrentSharedActorCritic
     clip_actions: False
-    sequence_length: 32
-    gru_hidden_size: 128
+    clip_log_std: True
+    min_log_std: -20.0
+    max_log_std: 2.0
+    initial_log_std: -0.6
+    sequence_length: 64
+    gru_hidden_size: 256
     gru_num_layers: 1
 
 
@@ -36,7 +40,7 @@ agent:
   class: PPODynamicsAuxRNN
   rollouts: 256
   learning_epochs: 6
-  mini_batches: 8
+  mini_batches: 4
   discount_factor: 0.99
   lambda: 0.95
   learning_rate: 3.0e-04
@@ -53,7 +57,7 @@ agent:
   ratio_clip: 0.2
   value_clip: 0.2
   clip_predicted_values: True
-  entropy_loss_scale: 0.005
+  entropy_loss_scale: 0.007
   value_loss_scale: 2.0
   kl_threshold: 0.0
   rewards_shaper_scale: 1.0
@@ -61,6 +65,7 @@ agent:
   dynamics_learning_rate: 5.0e-04
   dynamics_hidden_layers: [128, 128]
   dynamics_target_dims: 5
+  dynamics_use_normalized_vec: True
   time_limit_bootstrap: False
   # logging and checkpoint
   experiment:

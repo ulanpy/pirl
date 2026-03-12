@@ -245,7 +245,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Absolute cap for proximity penalty magnitude (should be negative).
     rew_proximity_max_penalty = -0.05
     # Additional penalty on positive closing speed (m/s) near obstacles.
-    rew_scale_proximity_rate = -0.05
+    rew_scale_proximity_rate = -0.0033333333333333335
     # Apply proximity-rate penalty only when nearest range is below this distance.
     proximity_rate_gate_distance = 1.2
     # Optional anti-reverse shaping (0 disables). Applies as: scale * relu(-forward_speed).

@@ -81,12 +81,14 @@ class _RecurrentBackbone(nn.Module):
             nn.Linear(256, 128),
             nn.ELU(),
         )
+        self.pre_gru_ln = nn.LayerNorm(128)
         self.gru = nn.GRU(
             input_size=128,
             hidden_size=gru_hidden_size,
             num_layers=gru_num_layers,
             batch_first=True,
         )
+        self.post_gru_ln = nn.LayerNorm(gru_hidden_size)
 
     def forward(
         self,
@@ -103,13 +105,20 @@ class _RecurrentBackbone(nn.Module):
         vec = states[:, vec_start : vec_start + vec_dim]
         costmap = states[:, costmap_start : costmap_start + (c * h * w)].reshape(-1, c, h, w)
         enc = torch.cat((self.vec_net(vec), self.cnn(costmap)), dim=-1)
-        enc = self.fusion(enc)
+        enc = self.pre_gru_ln(self.fusion(enc))
 
         use_sequence = (
             terminated is not None
             and sequence_length > 1
             and (enc.shape[0] % sequence_length == 0)
         )
+
+        if terminated is not None and sequence_length > 1 and (enc.shape[0] % sequence_length != 0):
+            raise ValueError(
+                "RNN training batch size is not divisible by sequence_length. "
+                f"Got batch={enc.shape[0]}, sequence_length={sequence_length}. "
+                "Adjust sequence_length / rollouts / num_envs / mini_batches so each sampled batch is divisible."
+            )
 
         if not use_sequence:
             if rnn_state is None:
@@ -121,7 +130,7 @@ class _RecurrentBackbone(nn.Module):
                     dtype=enc.dtype,
                 )
             out, rnn_next = self.gru(enc.unsqueeze(1), rnn_state)
-            return out.squeeze(1), rnn_next
+            return self.post_gru_ln(out.squeeze(1)), rnn_next
 
         batch = enc.shape[0] // sequence_length
         seq = enc.reshape(batch, sequence_length, -1)
@@ -150,6 +159,7 @@ class _RecurrentBackbone(nn.Module):
             o_t, h_t = self.gru(seq[:, t : t + 1, :], h_t)
             outputs.append(o_t)
         out = torch.cat(outputs, dim=1).reshape(-1, self.gru.hidden_size)
+        out = self.post_gru_ln(out)
         return out, h_t
 
 
@@ -271,3 +281,85 @@ class RecurrentDeterministicValue(DeterministicMixin, Model):
             costmap_shape=self._costmap_shape,
         )
         return self.value_head(feats), {"rnn": [rnn_next]}
+
+
+class RecurrentSharedActorCritic(GaussianMixin, DeterministicMixin, Model):
+    """Shared recurrent actor-critic model with one backbone and two heads."""
+
+    def __init__(
+        self,
+        observation_space,
+        action_space,
+        device,
+        num_envs: int = 1,
+        sequence_length: int = 32,
+        gru_hidden_size: int = 128,
+        gru_num_layers: int = 1,
+        clip_actions: bool = False,
+        clip_log_std: bool = True,
+        min_log_std: float = -20.0,
+        max_log_std: float = 2.0,
+        initial_log_std: float = -0.6,
+        return_source: bool = False,
+        **kwargs,
+    ) -> None:
+        Model.__init__(self, observation_space, action_space, device)
+        GaussianMixin.__init__(
+            self,
+            clip_actions=clip_actions,
+            clip_log_std=clip_log_std,
+            min_log_std=min_log_std,
+            max_log_std=max_log_std,
+            reduction="sum",
+        )
+        DeterministicMixin.__init__(self, clip_actions=clip_actions)
+
+        self._vec_start, self._vec_dim, self._costmap_start, self._costmap_shape = _get_obs_layout(observation_space)
+        self._num_envs = int(num_envs)
+        self._sequence_length = int(sequence_length)
+        self.backbone = _RecurrentBackbone(
+            vec_dim=self._vec_dim,
+            costmap_shape=self._costmap_shape,
+            gru_hidden_size=int(gru_hidden_size),
+            gru_num_layers=int(gru_num_layers),
+        )
+        action_dim = int(self.num_actions) if self.num_actions is not None else int(math.prod(action_space.shape))
+        self.mean_head = nn.Linear(int(gru_hidden_size), action_dim)
+        self.value_head = nn.Linear(int(gru_hidden_size), 1)
+        self.log_std_parameter = nn.Parameter(torch.full((action_dim,), float(initial_log_std)))
+
+    def get_specification(self) -> Mapping[str, Any]:
+        return {
+            "rnn": {
+                "sequence_length": self._sequence_length,
+                "sizes": [(self.backbone.gru.num_layers, self._num_envs, self.backbone.gru.hidden_size)],
+            }
+        }
+
+    def act(self, inputs, role=""):
+        if role == "policy":
+            return GaussianMixin.act(self, inputs, role)
+        if role == "value":
+            return DeterministicMixin.act(self, inputs, role)
+        raise ValueError(f"Unsupported role '{role}' for RecurrentSharedActorCritic")
+
+    def compute(self, inputs, role=""):
+        states = inputs["states"]
+        rnn_list = inputs.get("rnn", None)
+        rnn_state = rnn_list[0] if rnn_list else None
+        terminated = inputs.get("terminated", None)
+        feats, rnn_next = self.backbone(
+            states=states,
+            rnn_state=rnn_state,
+            sequence_length=self._sequence_length,
+            terminated=terminated,
+            vec_start=self._vec_start,
+            vec_dim=self._vec_dim,
+            costmap_start=self._costmap_start,
+            costmap_shape=self._costmap_shape,
+        )
+        if role == "policy":
+            return self.mean_head(feats), self.log_std_parameter, {"rnn": [rnn_next]}
+        if role == "value":
+            return self.value_head(feats), {"rnn": [rnn_next]}
+        raise ValueError(f"Unsupported role '{role}' for RecurrentSharedActorCritic")

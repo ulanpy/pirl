@@ -22,6 +22,9 @@ PPODynamicsAux_default_config = {
     "dynamics_hidden_layers": [128, 128],
     # Predict only the first N vec components as delta (e.g. [dot, cross, vx, vy, wz] => 5)
     "dynamics_target_dims": 5,
+    # Use normalized states (state_preprocessor) for dynamics supervision.
+    # This keeps aux targets/input scales stable during long training.
+    "dynamics_use_normalized_vec": True,
 }
 
 
@@ -59,6 +62,7 @@ class PPODynamicsAuxRNN(PPO_RNN):
         self._dynamics_learning_rate = self.cfg.get("dynamics_learning_rate", None)
         self._dynamics_hidden_layers = list(self.cfg.get("dynamics_hidden_layers", [128, 128]))
         self._dynamics_target_dims = int(self.cfg.get("dynamics_target_dims", 5))
+        self._dynamics_use_normalized_vec = bool(self.cfg.get("dynamics_use_normalized_vec", True))
 
         # Locate vec slice in flattened observation (dict keys are flattened in sorted order).
         self._vec_start, self._vec_size = self._infer_vec_slice(self.observation_space)
@@ -269,8 +273,13 @@ class PPODynamicsAuxRNN(PPO_RNN):
 
                     dynamics_loss = torch.tensor(0.0, device=self.device)
                     if self.dynamics_model is not None and self._dynamics_loss_scale > 0.0:
-                        vec_t = sampled_states_raw[:, self._vec_start : self._vec_end]
-                        vec_tp1 = sampled_next_states_raw[:, self._vec_start : self._vec_end]
+                        if self._dynamics_use_normalized_vec:
+                            sampled_next_states = self._state_preprocessor(sampled_next_states_raw, train=not epoch)
+                            vec_t = sampled_states[:, self._vec_start : self._vec_end]
+                            vec_tp1 = sampled_next_states[:, self._vec_start : self._vec_end]
+                        else:
+                            vec_t = sampled_states_raw[:, self._vec_start : self._vec_end]
+                            vec_tp1 = sampled_next_states_raw[:, self._vec_start : self._vec_end]
                         dyn_actions = sampled_actions
                         if (
                             policy_mean_action is not None
