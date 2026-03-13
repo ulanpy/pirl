@@ -30,44 +30,12 @@ class LocalPathManager:
             f"Unexpected env_origins shape {tuple(env_origins.shape)} for n={n}, num_envs={self.num_envs}."
         )
 
-    def _points_collide_obbs(
-        self, points_xy: torch.Tensor, obbs: torch.Tensor, margin: float
-    ) -> bool:
-        """Check if any point lies inside any inflated OBB (x, y, yaw, hx, hy)."""
-        if obbs.shape[0] == 0:
-            return False
-        rel = points_xy.unsqueeze(1) - obbs[:, :2].unsqueeze(0)  # (P, M, 2)
-        cos_yaw = torch.cos(obbs[:, 2]).unsqueeze(0)  # (1, M)
-        sin_yaw = torch.sin(obbs[:, 2]).unsqueeze(0)  # (1, M)
-        local_x = rel[..., 0] * cos_yaw + rel[..., 1] * sin_yaw
-        local_y = -rel[..., 0] * sin_yaw + rel[..., 1] * cos_yaw
-        hx = obbs[:, 3].unsqueeze(0) + margin
-        hy = obbs[:, 4].unsqueeze(0) + margin
-        inside = (torch.abs(local_x) <= hx) & (torch.abs(local_y) <= hy)
-        return bool(inside.any().item())
-
-    def _segment_collides_obbs(
-        self, p0: torch.Tensor, p1: torch.Tensor, obbs: torch.Tensor, margin: float, step: float
-    ) -> bool:
-        """Sample segment and test sampled points against inflated OBBs."""
-        if obbs.shape[0] == 0:
-            return False
-        seg = p1 - p0
-        length = float(torch.linalg.norm(seg).item())
-        n_samples = max(2, int(math.ceil(length / max(step, 1e-3))) + 1)
-        ts = torch.linspace(0.0, 1.0, n_samples, device=self.device).unsqueeze(1)
-        points = p0.unsqueeze(0) + ts * seg.unsqueeze(0)
-        return self._points_collide_obbs(points, obbs, margin)
-
-    def _generate_path_for_env(self, origin_xy: torch.Tensor, obbs: torch.Tensor) -> torch.Tensor:
-        """Step-by-step path generation with OBB-aware rejection and fallback."""
+    def _generate_path_for_env(self, origin_xy: torch.Tensor) -> torch.Tensor:
+        """Step-by-step curved path generation without static obstacle constraints."""
         k = self.cfg.path_num_points
         r_min, r_max = self.cfg.path_radius_range
         noise_scale = float(getattr(self.cfg, "path_heading_noise_scale", 0.35))
         mid_turn = float(getattr(self.cfg, "path_mid_turn_rad", 0.5))
-        obb_margin = float(getattr(self.cfg, "path_obb_margin", 0.25))
-        seg_step = float(getattr(self.cfg, "path_segment_check_step", 0.12))
-        max_step_resample = int(getattr(self.cfg, "path_step_max_resample", 20))
 
         angle_range = getattr(self.cfg, "path_angle_range", None)
         if angle_range is not None:
@@ -90,90 +58,30 @@ class LocalPathManager:
                 base_heading += float((torch.rand(1, device=self.device).item() - 0.5) * 2.0 * mid_turn)
                 turn_applied = True
 
-            accepted = False
-            for _ in range(max_step_resample):
-                heading_try = base_heading + float((torch.rand(1, device=self.device).item() - 0.5) * 2.0 * noise_scale)
-                direction = torch.tensor([math.cos(heading_try), math.sin(heading_try)], device=self.device)
-                candidate = curr + step_len * direction
-                candidate_radius = float(torch.linalg.norm(candidate - origin_xy).item())
-                if candidate_radius < prev_radius - 0.03:
-                    continue
-                if self._segment_collides_obbs(curr, candidate, obbs, obb_margin, seg_step):
-                    continue
-                path[i] = candidate
-                curr = candidate
-                prev_radius = candidate_radius
-                heading = heading_try
-                accepted = True
-                break
-
-            if not accepted:
-                # Deterministic fallback sweep around current heading for hard scenes.
-                fallback_done = False
-                for delta in (0.45, -0.45, 0.9, -0.9, 1.35, -1.35):
-                    heading_try = base_heading + delta
-                    direction = torch.tensor([math.cos(heading_try), math.sin(heading_try)], device=self.device)
-                    candidate = curr + step_len * direction
-                    if self._segment_collides_obbs(curr, candidate, obbs, obb_margin, seg_step):
-                        continue
-                    path[i] = candidate
-                    curr = candidate
-                    prev_radius = float(torch.linalg.norm(candidate - origin_xy).item())
-                    heading = heading_try
-                    fallback_done = True
-                    break
-                if not fallback_done:
-                    # Last-resort: keep moving slightly forward to preserve continuity.
-                    candidate = curr + 0.25 * torch.tensor([math.cos(base_heading), math.sin(base_heading)], device=self.device)
-                    path[i] = candidate
-                    curr = candidate
-                    prev_radius = float(torch.linalg.norm(candidate - origin_xy).item())
-                    heading = base_heading
+            heading_try = base_heading + float((torch.rand(1, device=self.device).item() - 0.5) * 2.0 * noise_scale)
+            direction = torch.tensor([math.cos(heading_try), math.sin(heading_try)], device=self.device)
+            candidate = curr + step_len * direction
+            path[i] = candidate
+            curr = candidate
+            prev_radius = float(torch.linalg.norm(candidate - origin_xy).item())
+            heading = heading_try
         return path
 
     def reset(
         self,
         env_ids,
         env_origins: torch.Tensor,
-        obstacle_obbs_per_env: list[torch.Tensor] | None = None,
     ) -> None:
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
         if isinstance(env_ids, (list, range)):
             env_ids = torch.tensor(list(env_ids), device=self.device, dtype=torch.long)
         n = env_ids.shape[0]
-        max_resample = int(getattr(self.cfg, "path_obstacle_max_resample", 12))
         env_origins_sub = self._extract_env_origins_xy(env_ids, env_origins)
 
-        if obstacle_obbs_per_env is None:
-            obstacles = [torch.zeros(0, 5, device=self.device) for _ in range(n)]
-        else:
-            if len(obstacle_obbs_per_env) != n:
-                raise ValueError(
-                    f"obstacle_obbs_per_env length {len(obstacle_obbs_per_env)} "
-                    f"must match number of reset envs {n}."
-                )
-            obstacles = obstacle_obbs_per_env
-
         path_points = torch.zeros((n, self.cfg.path_num_points, 2), device=self.device)
-        obb_margin = float(getattr(self.cfg, "path_obb_margin", 0.25))
-        seg_step = float(getattr(self.cfg, "path_segment_check_step", 0.12))
         for i in range(n):
-            path = self._generate_path_for_env(env_origins_sub[i], obstacles[i])
-            tries = 0
-            while tries < max_resample:
-                has_collision = False
-                for j in range(path.shape[0]):
-                    p0 = env_origins_sub[i] if j == 0 else path[j - 1]
-                    p1 = path[j]
-                    if self._segment_collides_obbs(p0, p1, obstacles[i], obb_margin, seg_step):
-                        has_collision = True
-                        break
-                if not has_collision:
-                    break
-                path = self._generate_path_for_env(env_origins_sub[i], obstacles[i])
-                tries += 1
-            path_points[i] = path
+            path_points[i] = self._generate_path_for_env(env_origins_sub[i])
 
         self.path_points_w[env_ids] = path_points
         self.path_idx[env_ids] = 0

@@ -5,6 +5,7 @@
 
 from .ppo_dynamics_aux import PPODynamicsAux, PPODynamicsAuxRNN, PPODynamicsAux_default_config
 from .recurrent_models import (
+    FeedForwardDeterministicValue,
     RecurrentDeterministicValue,
     RecurrentGaussianPolicy,
     RecurrentSharedActorCritic,

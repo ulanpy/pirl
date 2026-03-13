@@ -283,6 +283,60 @@ class RecurrentDeterministicValue(DeterministicMixin, Model):
         return self.value_head(feats), {"rnn": [rnn_next]}
 
 
+class FeedForwardDeterministicValue(DeterministicMixin, Model):
+    """Deterministic value model without recurrent state (vec+costmap fusion only)."""
+
+    def __init__(
+        self,
+        observation_space,
+        action_space,
+        device,
+        clip_actions: bool = False,
+        return_source: bool = False,
+        **kwargs,
+    ) -> None:
+        Model.__init__(self, observation_space, action_space, device)
+        DeterministicMixin.__init__(self, clip_actions=clip_actions)
+        self._vec_start, self._vec_dim, self._costmap_start, self._costmap_shape = _get_obs_layout(observation_space)
+        c, h, w = self._costmap_shape
+        self.vec_net = nn.Sequential(
+            nn.Linear(self._vec_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 64),
+            nn.ELU(),
+        )
+        self.cnn = nn.Sequential(
+            nn.Conv2d(c, 16, kernel_size=3, stride=2),
+            nn.ELU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2),
+            nn.ELU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2),
+            nn.ELU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=2),
+            nn.ELU(),
+            nn.Flatten(),
+        )
+        with torch.no_grad():
+            dummy = torch.zeros(1, c, h, w)
+            cnn_dim = int(self.cnn(dummy).shape[-1])
+        self.fusion = nn.Sequential(
+            nn.Linear(64 + cnn_dim, 256),
+            nn.ELU(),
+            nn.Linear(256, 128),
+            nn.ELU(),
+        )
+        self.value_head = nn.Linear(128, 1)
+
+    def compute(self, inputs, role=""):
+        states = inputs["states"]
+        c, h, w = self._costmap_shape
+        vec = states[:, self._vec_start : self._vec_start + self._vec_dim]
+        costmap = states[:, self._costmap_start : self._costmap_start + (c * h * w)].reshape(-1, c, h, w)
+        feats = torch.cat((self.vec_net(vec), self.cnn(costmap)), dim=-1)
+        feats = self.fusion(feats)
+        return self.value_head(feats), {}
+
+
 class RecurrentSharedActorCritic(GaussianMixin, DeterministicMixin, Model):
     """Shared recurrent actor-critic model with one backbone and two heads."""
 

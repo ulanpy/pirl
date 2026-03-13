@@ -1,13 +1,44 @@
-# PPODynamicsAux: detailed guide
+# PPODynamicsAuxRNN: detailed guide
 
-This document explains how the custom agent `PPODynamicsAux` works in this project, how it differs from standard PPO in `skrl`, and how to run / debug it.
+This document explains how the custom agent `PPODynamicsAuxRNN` works in this project, how it differs from standard PPO in `skrl`, and how to run / debug it.
+
+## Current PPO-RNN architecture (project snapshot)
+
+The current setup is a recurrent PPO agent with an auxiliary dynamics objective:
+
+- **Agent class**: `PPODynamicsAuxRNN` (inherits `skrl` `PPO_RNN`)
+- **Model class**: `RecurrentSharedActorCritic` used for both policy and value (single shared instance)
+- **Backbone**:
+  - `vec` MLP: `15 -> 64 -> 64` (ELU)
+  - `costmap` CNN: `4` stacked frames -> conv stack -> flattened features
+  - feature fusion: `concat(vec_feat, cnn_feat) -> 256 -> 128` (ELU)
+  - recurrent neck: `GRU(input=128, hidden=256, layers=1, batch_first=True)`
+  - stabilization: `LayerNorm` before GRU and on GRU outputs
+- **Heads**:
+  - policy head: linear `256 -> 2` (normalized actions in `[-1, 1]`)
+  - value head: linear `256 -> 1`
+  - stochastic policy uses trainable `log_std_parameter`
+- **RNN training window**:
+  - sequence-aware mini-batching via `PPO_RNN`
+  - default `sequence_length` from config: `64`
+  - done-masked hidden-state reset inside recurrent forward pass
+- **Aux dynamics head** (separate MLP in agent, not in backbone):
+  - input: `[vec_t, action_t]`
+  - target: `delta(vec) = vec_{t+1}[:N] - vec_t[:N]`
+  - default `N = 5`
+  - by default uses **normalized vec slices** (`dynamics_use_normalized_vec: True`)
+- **Optimization objective**:
+  - `policy_loss + value_loss + entropy_loss + dynamics_loss`
+  - with gradient carrier from policy mean action into aux branch (so dynamics can shape policy/backbone)
+
+In short: this is not "PPO + RNN wrapper only". It is a shared recurrent actor-critic with a GRU neck, sequence-aware PPO training, and an auxiliary dynamics objective that backpropagates into policy features.
 
 ## Short answer: is PPO implemented "from scratch"?
 
 No. It is **not** a fully independent PPO implementation.
 
-`PPODynamicsAux`:
-- inherits from `skrl.agents.torch.ppo.ppo.PPO`
+`PPODynamicsAuxRNN`:
+- inherits from `skrl.agents.torch.ppo.ppo_rnn.PPO_RNN`
 - reuses core PPO agent machinery from `skrl` (memory interface, preprocessors, optimizer/scaler handling, scheduler hooks, model API)
 - overrides only parts needed for auxiliary dynamics learning:
   - custom config merge

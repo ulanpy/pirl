@@ -6,7 +6,7 @@ seed: 42
 models:
   separate: True
   policy:
-    class: RecurrentSharedActorCritic
+    class: RecurrentGaussianPolicy
     clip_actions: False
     clip_log_std: True
     min_log_std: -20.0
@@ -16,15 +16,8 @@ models:
     gru_hidden_size: 256
     gru_num_layers: 1
   value:
-    class: RecurrentSharedActorCritic
+    class: FeedForwardDeterministicValue
     clip_actions: False
-    clip_log_std: True
-    min_log_std: -20.0
-    max_log_std: 2.0
-    initial_log_std: -0.6
-    sequence_length: 64
-    gru_hidden_size: 256
-    gru_num_layers: 1
 
 
 # Rollout memory

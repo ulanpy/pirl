@@ -57,11 +57,6 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Curvature (ROS2-like local path: not a straight line).
     path_heading_noise_scale = 0.35  # rad per step; larger → more turns
     path_mid_turn_rad = 0.5  # extra turn in second half of path (rad), ±random
-    # Obstacle-aware local path generation (OBB-based; closer to ROS2 controller constraints).
-    path_obb_margin = 0.25  # inflate each obstacle OBB by this margin (m)
-    path_segment_check_step = 0.12  # sample step along each segment for collision check (m)
-    path_step_max_resample = 20  # attempts for each waypoint before fallback
-    path_obstacle_max_resample = 8  # full-path retries if a difficult env still collides
     observation_space = gym.spaces.Dict(
         {
             "vec": gym.spaces.Box(
@@ -89,48 +84,6 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Static warehouse scene (shelves + obstacles), no SceneBlox generation.
     sceneblox_usd_paths: tuple[str, ...] = (
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/warehouse_with_forklifts.usd",
-    )
-    # Per-episode static obstacle randomization inside the warehouse.
-    dr_obstacle_usd_paths: tuple[str, ...] = (
-        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Props/Forklift/forklift.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLarge_A5.usd",
-        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A7.usd",
-        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A5.usd",
-        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Industrial/Racks/RackLong_A4.usd",
-        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_RackFrame_03.usd",
-        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_RackShelf_01.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_PaletteA_01.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_PaletteA_02.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxC_01.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxD_02.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/S_TrafficCone.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/Props/S_WetFloorSign.usd",
-    )
-    # Keep local obstacle density high while reducing total prim count.
-    dr_obstacle_slot_count = 18
-    dr_obstacle_count_range = (10, 18)
-    dr_obstacle_xy_range = ((-6.0, 6.0), (-6.0, 6.0))
-    dr_obstacle_keepout_radius = 1.0
-    dr_obstacle_min_separation = 2.0
-    dr_obstacle_max_sample_tries = 40
-    # OBB footprint per DR asset for path planning (final meters after any scale).
-    dr_obstacle_default_half_extents_xy = (0.45, 0.30)
-    dr_obstacle_half_extents_safety_scale = 1.15
-    dr_obstacle_half_extents_xy_overrides: tuple[tuple[str, tuple[float, float]], ...] = (
-        ("RackLarge_A5.usd", (1.05, 0.52)),
-        ("SM_PaletteA_01.usd", (0.62, 0.52)),
-        ("SM_PaletteA_02.usd", (0.62, 0.52)),
-        ("SM_CardBoxC_01.usd", (0.35, 0.28)),
-        ("SM_CardBoxD_02.usd", (0.42, 0.32)),
-        ("S_TrafficCone.usd", (0.18, 0.18)),
-        ("S_WetFloorSign.usd", (0.25, 0.16)),
-        ("forklift.usd", (1.15, 0.62)),
-    )
-    # Static obstacles baked into warehouse scene (not DR assets), referenced by prim name.
-    path_scene_static_obstacle_names: tuple[str, ...] = ("Forklift", "Forklift_01")
-    path_scene_static_obstacle_half_extents_xy_overrides: tuple[tuple[str, tuple[float, float]], ...] = (
-        ("Forklift", (1.15, 0.62)),
-        ("Forklift_01", (1.15, 0.62)),
     )
     # Runtime dynamic obstacles (stable replacement for people in RL training).
     # Runtime moving XForm obstacles are expensive for ray-caster tracking in headless mode.
@@ -226,14 +179,17 @@ class PirlEnvCfg(DirectRLEnvCfg):
     wheel_radius = 0.03  # m (60mm diameter)
     track_width = 0.242  # m
     
-    # reward progress toward current path point
+    # Reward scales calibrated for env step dt = 1/60 s.
+    # With max_lin_vel=0.5, max distance change per step is ~0.0083 m:
+    # progress step ~= +0.083 (scale 10), regress step ~= -0.017..-0.025.
     rew_scale_progress = 10.0
-    rew_scale_regress = -2.0  # penalize moving away from current waypoint (anti-spin)
-    # one-time bonus when reaching each path point
-    rew_goal_bonus = 10.0
-    # small per-step penalty (must stay much smaller than goal bonus)
-    rew_step_penalty = 0.0
-    rew_scale_collision = -50.0
+    rew_scale_regress = -3.0  # stronger anti-spin when drifting away from target
+    # One-time bonus when reaching each path point (sparse, should not dominate every step).
+    rew_goal_bonus = 8.0
+    # Per-step living cost must be negative to avoid "survive by spinning" behavior.
+    rew_step_penalty = 0
+    # Terminal collision penalty: high, but not so extreme that agent freezes.
+    rew_scale_collision = -15.0
     collision_robot_radius = 0.20  # slightly larger to keep collision signal aligned with proximity
     # Dense proximity penalty (exp-shaped); 0 with no obstacles.
     # Penalty activates when nearest obstacle in front sector is closer than this distance.
@@ -242,15 +198,11 @@ class PirlEnvCfg(DirectRLEnvCfg):
     proximity_exponential_rate = 2.0
     # FOV for proximity penalty. Set to 360 to cover all sides.
     proximity_front_fov_deg = 360.0
-    # Absolute cap for proximity penalty magnitude (should be negative).
-    rew_proximity_max_penalty = -0.05
-    # Additional penalty on positive closing speed (m/s) near obstacles.
-    rew_scale_proximity_rate = -0.0033333333333333335
-    # Apply proximity-rate penalty only when nearest range is below this distance.
-    proximity_rate_gate_distance = 1.2
+    # Absolute cap for proximity penalty magnitude (dense shaping, per-step).
+    rew_proximity_max_penalty = -0.03
     # Optional anti-reverse shaping (0 disables). Applies as: scale * relu(-forward_speed).
-    rew_scale_reverse = -0.5
-    rew_scale_heading = 0.01
+    rew_scale_reverse = -0.2
+    rew_scale_heading = 0.005
     # Penalty for yaw-command jitter (squared difference of normalized yaw action)
     rew_scale_action_rate = 0.0 #-0.08
 
