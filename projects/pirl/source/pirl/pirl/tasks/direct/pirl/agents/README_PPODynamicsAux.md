@@ -1,294 +1,225 @@
-# PPODynamicsAuxRNN: detailed guide
+# PPODynamicsAuxRNN: Current Pipeline (with LaTeX)
 
-This document explains how the custom agent `PPODynamicsAuxRNN` works in this project, how it differs from standard PPO in `skrl`, and how to run / debug it.
+This document describes the **current** implementation in this repository:
 
-## Current PPO-RNN architecture (project snapshot)
+- PPO-RNN agent (`PPODynamicsAuxRNN`)
+- recurrent actor (`RecurrentGaussianPolicy`)
+- feed-forward critic (`FeedForwardDeterministicValue`)
+- auxiliary dynamics head
+- HJB PINN-style regularizer for the critic
 
-The current setup is a recurrent PPO agent with an auxiliary dynamics objective:
+## 1) High-level architecture
 
-- **Agent class**: `PPODynamicsAuxRNN` (inherits `skrl` `PPO_RNN`)
-- **Model class**: `RecurrentSharedActorCritic` used for both policy and value (single shared instance)
-- **Backbone**:
-  - `vec` MLP: `15 -> 64 -> 64` (ELU)
-  - `costmap` CNN: `4` stacked frames -> conv stack -> flattened features
-  - feature fusion: `concat(vec_feat, cnn_feat) -> 256 -> 128` (ELU)
-  - recurrent neck: `GRU(input=128, hidden=256, layers=1, batch_first=True)`
-  - stabilization: `LayerNorm` before GRU and on GRU outputs
-- **Heads**:
-  - policy head: linear `256 -> 2` (normalized actions in `[-1, 1]`)
-  - value head: linear `256 -> 1`
-  - stochastic policy uses trainable `log_std_parameter`
-- **RNN training window**:
-  - sequence-aware mini-batching via `PPO_RNN`
-  - default `sequence_length` from config: `64`
-  - done-masked hidden-state reset inside recurrent forward pass
-- **Aux dynamics head** (separate MLP in agent, not in backbone):
-  - input: `[vec_t, action_t]`
-  - target: `delta(vec) = vec_{t+1}[:N] - vec_t[:N]`
-  - default `N = 5`
-  - by default uses **normalized vec slices** (`dynamics_use_normalized_vec: True`)
-- **Optimization objective**:
-  - `policy_loss + value_loss + entropy_loss + dynamics_loss`
-  - with gradient carrier from policy mean action into aux branch (so dynamics can shape policy/backbone)
+### Actor (recurrent)
 
-In short: this is not "PPO + RNN wrapper only". It is a shared recurrent actor-critic with a GRU neck, sequence-aware PPO training, and an auxiliary dynamics objective that backpropagates into policy features.
+- Input: flattened `Dict(obs)` with keys `vec` and `costmap`
+- `vec` branch:
+  - split into `core_vec` and optional `aux_vec` tail (`aux_dim`)
+  - core MLP: `core_dim -> 64 -> 64`
+  - aux MLP (if `aux_dim > 0`): `aux_dim -> 32 -> 32`
+- `costmap` branch:
+  - CNN (4 conv layers) -> flatten
+- Fusion:
+  - concat features -> MLP `-> 256 -> 128`
+  - `LayerNorm` before GRU
+- Recurrent neck:
+  - `GRU(128 -> 256, num_layers=1, batch_first=True)`
+  - output `LayerNorm`
+- Output head:
+  - mean action head `Linear(256 -> 2)`
+  - trainable `log_std_parameter`
 
-## Short answer: is PPO implemented "from scratch"?
+### Critic (feed-forward)
 
-No. It is **not** a fully independent PPO implementation.
+- No recurrent state
+- `vec` MLP + `costmap` CNN -> concat -> fusion MLP -> `value_head (128 -> 1)`
 
-`PPODynamicsAuxRNN`:
-- inherits from `skrl.agents.torch.ppo.ppo_rnn.PPO_RNN`
-- reuses core PPO agent machinery from `skrl` (memory interface, preprocessors, optimizer/scaler handling, scheduler hooks, model API)
-- overrides only parts needed for auxiliary dynamics learning:
-  - custom config merge
-  - storage of `next_states` for dynamics supervision
-  - `_update()` loop with extra `dynamics_loss`
+## 2) Observation and action
 
-So this is best described as:
-**"skrl PPO with a custom training update that adds auxiliary dynamics loss."**
+Current `vec` size in env config:
 
----
+$$
+\text{vec\_dim} = 5 + 2 \cdot \text{path\_num\_points} + 2 + 7
+$$
 
-## Files and responsibilities
+With `path_num_points = 4`:
 
-- `ppo_dynamics_aux.py`
-  - defines `PPODynamicsAux` class
-  - defines `PPODynamicsAux_default_config`
-  - overrides `init()` and `_update()`
-- `runner_utils.py`
-  - custom runner factory used by train/play
-  - resolves `agent.class: PPODynamicsAux`
-  - resolves `ppodynamicsaux_default_config`
-  - instantiates custom agent with merged config
-- `skrl_ppo_aux_cfg.yaml`
-  - experiment config for this custom agent
-  - sets `agent.class: PPODynamicsAux`
-  - sets PPO hyperparameters and aux hyperparameters
+$$
+\text{vec\_dim} = 22
+$$
 
----
+`costmap` shape is `(4, 100, 100)`.
 
-## Config flow (important)
+Action is normalized:
 
-Configuration is merged in layers:
+$$
+a_t = [a_v, a_\omega] \in [-1, 1]^2
+$$
 
-1) Base PPO defaults from `skrl`:
-- `PPO_DEFAULT_CONFIG`
+Scaled control:
 
-2) Aux-specific defaults:
-- `PPODynamicsAux_default_config`
-- keys:
-  - `dynamics_loss_scale`
-  - `dynamics_learning_rate`
-  - `dynamics_hidden_layers`
-  - `dynamics_target_dims`
+$$
+v_t = a_v \cdot v_{\max}, \quad \omega_t = a_\omega \cdot \omega_{\max}
+$$
 
-3) YAML overrides (`agent:` block from `skrl_ppo_aux_cfg.yaml`)
+with \(v_{\max}=0.5\), \(\omega_{\max}=3.0\).
 
-Priority order:
-**YAML > PPODynamicsAux defaults > skrl PPO defaults**
+## 3) PPO-RNN batching logic
 
-This means YAML values always win.
+Current config:
 
----
+- `rollouts = 256`
+- `num_envs = 10`
+- `sequence_length = 64`
+- `mini_batches = 4`
 
-## Observation assumption
+Transitions per update:
 
-`PPODynamicsAux` assumes a **Dict observation space** with a key `"vec"`.
+$$
+N = 256 \cdot 10 = 2560
+$$
 
-Why:
-- the aux task predicts delta of compact vector state
-- code infers where `"vec"` lives in flattened observation layout and slices it every batch
+Per mini-batch:
 
-If `"vec"` is missing, initialization fails by design.
+$$
+N_{mb} = \frac{2560}{4} = 640
+$$
 
----
+Validity condition for RNN sequence batching:
 
-## Auxiliary task definition
+$$
+N_{mb} \bmod \text{sequence\_length} = 0
+$$
 
-For each sampled transition `(s_t, a_t, s_{t+1})`:
+Here \(640 \bmod 64 = 0\), so sequence chunks are valid.
 
-- extract:
-  - `vec_t` from `s_t`
-  - `vec_t+1` from `s_{t+1}`
-- define target:
-  - `delta_true = vec_t+1[:N] - vec_t[:N]`
-  - where `N = dynamics_target_dims`
-- model:
-  - `dynamics_model([vec_t, action]) -> delta_pred`
-- loss:
-  - `dynamics_loss = dynamics_loss_scale * MSE(delta_pred, delta_true)`
+## 4) Training objective
 
-This loss is added to the PPO objective in backprop.
+Total loss:
 
----
+$$
+\mathcal{L}_{total}
+= \mathcal{L}_{ppo}
+ + \mathcal{L}_{value}
+ + \mathcal{L}_{entropy}
+ + \mathcal{L}_{dyn}
+ + \mathcal{L}_{hjb}
+$$
 
-## Update loop: what exactly happens
+### PPO surrogate
 
-Inside `_update()`:
+$$
+r_t(\theta)=\exp\left(\log \pi_\theta(a_t|s_t)-\log \pi_{old}(a_t|s_t)\right)
+$$
 
-1) compute `returns` and `advantages` (GAE, same PPO style)
-2) sample mini-batches from memory, including `next_states`
-3) compute standard PPO losses:
-   - policy surrogate loss
-   - value loss
-   - entropy loss (if enabled)
-4) compute auxiliary dynamics loss
-5) backpropagate:
-   - `policy_loss + value_loss + entropy_loss + dynamics_loss`
-6) optimizer step / scaler step / scheduler step
-7) log metrics
+$$
+\mathcal{L}_{ppo}
+= - \mathbb{E}\left[
+\min\left(r_t A_t,\;\text{clip}(r_t,1-\epsilon,1+\epsilon)A_t\right)
+\right]
+$$
 
-So aux loss participates in the same backward pass as PPO losses.
+### Value loss
 
----
+$$
+\mathcal{L}_{value}
+= c_v \cdot \text{MSE}\left(V_\phi(s_t), \hat{R}_t\right)
+$$
 
-## How dynamics loss reaches policy/backbone
+### Entropy loss
 
-Current implementation intentionally creates a differentiable path from dynamics objective to policy params.
+$$
+\mathcal{L}_{entropy}
+= -c_e \cdot \mathbb{E}\left[\mathcal{H}\big(\pi_\theta(\cdot|s_t)\big)\right]
+$$
 
-Mechanism:
-- forward side stays aligned with executed rollout action (`sampled_actions`)
-- gradient side uses policy mean action as carrier
+### Auxiliary dynamics loss
 
-Implemented as:
-- `dyn_actions = sampled_actions + (policy_mean_action - policy_mean_action.detach())`
+For first \(N_d=\text{dynamics\_target\_dims}\) vec components:
 
-Effect:
-- forward value equals `sampled_actions`
-- gradient flows through `policy_mean_action`
-- therefore `dynamics_loss` can update policy/shared backbone parameters
+$$
+\Delta \mathbf{v}^{true}_t
+= \mathbf{v}_{t+1}^{(1:N_d)} - \mathbf{v}_t^{(1:N_d)}
+$$
 
-When models are shared (`models.separate: False`), this also affects shared actor-critic features.
+$$
+\Delta \mathbf{v}^{pred}_t = f_{dyn}\left([\mathbf{v}_t, a_t^{dyn}]\right)
+$$
 
----
+$$
+\mathcal{L}_{dyn}
+= \lambda_{dyn}\cdot \text{MSE}\left(\Delta \mathbf{v}^{pred}_t,\Delta \mathbf{v}^{true}_t\right)
+$$
 
-## Dynamics head architecture
+Gradient-carrier action:
 
-`dynamics_model` is a small MLP:
-- input: `[vec_t, action_t]`
-- hidden: `dynamics_hidden_layers` (default `[128, 128]`)
-- output: `dynamics_target_dims` (delta for first N vec components)
+$$
+a_t^{dyn}
+= a_t + \left(\mu_\theta(s_t)-\operatorname{stopgrad}(\mu_\theta(s_t))\right)
+$$
 
-Learning rate:
-- if `dynamics_learning_rate` is set -> use it
-- else -> reuse PPO learning rate
+Forward value stays at rollout action \(a_t\), while gradients flow through policy mean \(\mu_\theta\).
 
-Implementation detail:
-- dynamics params are added as an extra param group to the same optimizer.
+### HJB PINN-style regularizer
 
----
+The critic is differentiated by autograd w.r.t. critic input:
 
-## TensorBoard signals to watch
+$$
+\nabla_s V_\phi(s_t)
+$$
 
-Primary:
+Using relative-goal coordinates \((x_t, y_t)\) from `vec`:
+
+$$
+\dot{x}_t = -v_t + \omega_t y_t,\qquad
+\dot{y}_t = -\omega_t x_t
+$$
+
+Running cost:
+
+$$
+\ell_t
+= w_t + w_d\sqrt{x_t^2+y_t^2+\varepsilon}
+ + w_u\left(v_t^2 + 0.1\omega_t^2\right)
+$$
+
+Hamiltonian residual:
+
+$$
+\mathcal{H}_t
+= \ell_t
+ + \frac{\partial V}{\partial x}\dot{x}_t
+ + \frac{\partial V}{\partial y}\dot{y}_t
+$$
+
+HJB loss:
+
+$$
+\mathcal{L}_{hjb}
+= \lambda_{hjb}\cdot \mathbb{E}\left[\mathcal{H}_t^2\right]
+$$
+
+## 5) Important runtime details
+
+- HJB branch is computed in FP32 block for gradient stability.
+- If critic-input gradient is disconnected for a mini-batch, the code uses a safe fallback
+  (zero gradient tensor) instead of crashing.
+- Done masks are used to reset GRU hidden states within sequence processing.
+
+## 6) Key TensorBoard metrics
+
 - `Loss / Policy loss`
 - `Loss / Value loss`
-- `Loss / Entropy loss` (if used)
+- `Loss / Entropy loss`
 - `Loss / Dynamics loss`
-
-Aux influence diagnostics:
+- `Loss / HJB loss`
 - `Grad / Dynamics-to-policy norm`
-  - estimated norm of gradients of `dynamics_loss` wrt policy parameters
-  - `> 0` means aux objective has a path to policy/backbone
+- `Policy / Standard deviation`
+- `Learning / Learning rate`
 
-Interpretation:
-- very small but non-zero values can still be valid
-- the useful quantity is often ratio vs PPO gradient scale and behavioral impact in A/B runs
-
----
-
-## Runner integration
-
-`get_runner(...)` in `runner_utils.py`:
-- uses standard `skrl` path for built-in agents (`PPO`, `SAC`, etc.)
-- for `PPODynamicsAux`:
-  - resolves custom class
-  - resolves custom default config
-  - builds memory
-  - merges config
-  - constructs agent instance
-
-So train/play stay generic while still supporting custom agent classes.
-
----
-
-## How to run
-
-Example training with aux config:
+## 7) Run command
 
 ```bash
 /isaac-sim/python.sh scripts/skrl/train.py --task jettank --agent skrl_ppo_aux_cfg_entry_point
 ```
-
-Baseline run (no aux):
-- use your baseline config entry point (the one mapped to standard PPO in environment registration)
-
-Recommended experimental setup:
-- same seeds
-- baseline vs aux
-- compare:
-  - success/collision behavior
-  - reward curves
-  - convergence speed
-  - dynamics and grad diagnostics
-
----
-
-## Common pitfalls
-
-1) Missing `"vec"` observation key
-- aux agent depends on it
-
-2) Too small `dynamics_loss_scale`
-- aux signal exists but has little practical impact
-
-3) Too large `dynamics_loss_scale`
-- can destabilize PPO optimization
-
-4) Misreading losses by magnitude only
-- compare trends and behavior, not raw scales across different objectives
-
-5) Assuming aux head alone guarantees obstacle avoidance
-- this aux currently predicts ego-dynamics deltas, not explicit collision risk
-
----
-
-## Practical tuning tips
-
-Start conservative:
-- `dynamics_loss_scale`: `0.02 -> 0.05`
-- keep PPO lr unchanged first
-
-Then:
-- monitor `Grad / Dynamics-to-policy norm`
-- run A/B with `scale=0` vs `scale>0`
-- increase to `0.1` only if training remains stable and aux impact is still weak
-
-If instability appears:
-- reduce `dynamics_loss_scale`
-- reduce `dynamics_learning_rate`
-- reduce `dynamics_target_dims`
-
----
-
-## Current design limits
-
-- Aux supervision target is only `delta vec` for first N components
-- This improves motion modeling but is not a direct safety classifier
-- For stronger obstacle-avoidance effect, consider extending aux targets:
-  - short-horizon collision risk
-  - time-to-collision proxies
-  - occupancy change prediction in local map
-
----
-
-## Minimal mental model
-
-Think of this agent as:
-- PPO that still optimizes return
-- plus an extra self-supervised dynamics objective
-- with gradient routing so the aux objective can shape policy features
-
-That is exactly the intended PINN-inspired bridge in this implementation.
 
