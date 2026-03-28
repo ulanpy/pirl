@@ -8,5 +8,4 @@ from .recurrent_models import (
     FeedForwardDeterministicValue,
     RecurrentDeterministicValue,
     RecurrentGaussianPolicy,
-    RecurrentSharedActorCritic,
 )

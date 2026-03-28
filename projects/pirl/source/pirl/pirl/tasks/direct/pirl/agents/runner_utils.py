@@ -17,7 +17,6 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                     FeedForwardDeterministicValue,
                     RecurrentDeterministicValue,
                     RecurrentGaussianPolicy,
-                    RecurrentSharedActorCritic,
                 )
                 custom_components = {
                     "ppodynamicsaux": PPODynamicsAuxRNN,
@@ -27,7 +26,6 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                     "recurrentgaussianpolicy": RecurrentGaussianPolicy,
                     "recurrentdeterministicvalue": RecurrentDeterministicValue,
                     "feedforwarddeterministicvalue": FeedForwardDeterministicValue,
-                    "recurrentsharedactorcritic": RecurrentSharedActorCritic,
                 }
                 if lname in custom_components:
                     return custom_components[lname]
@@ -43,20 +41,9 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                     if model_class in [
                         "recurrentgaussianpolicy",
                         "recurrentdeterministicvalue",
-                        "recurrentsharedactorcritic",
                     ]:
                         role_cfg.setdefault("num_envs", env.num_envs)
                 models = cast(dict[str, dict[str, Any]], super()._generate_models(env, cfg))
-                # Optional hard sharing: if both roles use the shared recurrent class,
-                # force a single instance for policy and value.
-                policy_cfg = models_cfg.get("policy", {}) if isinstance(models_cfg, dict) else {}
-                value_cfg = models_cfg.get("value", {}) if isinstance(models_cfg, dict) else {}
-                p_class = str(policy_cfg.get("class", "")).lower()
-                v_class = str(value_cfg.get("class", "")).lower()
-                if p_class == "recurrentsharedactorcritic" and v_class == "recurrentsharedactorcritic":
-                    for agent_id in models:
-                        if "policy" in models[agent_id] and "value" in models[agent_id]:
-                            models[agent_id]["value"] = models[agent_id]["policy"]
                 return models
 
             def _generate_agent(self, env, cfg, models):

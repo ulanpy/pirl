@@ -40,9 +40,11 @@ class PirlEnv(DirectRLEnv):
         self._latest_lidar_ranges_m = None
         self.proximity = ProximityReward(self.cfg, self.device, self.num_envs)
         self.extras = {}
-        # For action-rate reward: current and previous step actions (shape [num_envs, 2])
+        # Current and previous actions (shape [num_envs, 2]); previous action is part of observation.
         self.actions = torch.zeros((self.num_envs, 2), device=self.device)
         self.prev_actions = torch.zeros((self.num_envs, 2), device=self.device)
+        # Info to pass into recurrent model: previous action + reward breakdown
+        self.prev_reward_components = torch.zeros((self.num_envs, 7), device=self.device)
         # IRA setup deferred to first reset() so NavMesh bakes after sim has run and scene is composed.
 
     def _setup_scene(self):
@@ -94,7 +96,7 @@ class PirlEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        # Save previous action before updating (for action-rate penalty in reward)
+        # Save previous action before updating.
         self.prev_actions.copy_(self.actions)
         # PPO actions are sampled from an unbounded Gaussian; clamp to keep in [-1, 1]
         self.actions = torch.clamp(actions, -1.0, 1.0).clone()
@@ -200,7 +202,21 @@ class PirlEnv(DirectRLEnv):
         # Local path segment in robot frame
         path_obs = self.path_manager.get_segment(robot_pos_w, self.robot.data.root_quat_w, curr_idx)
 
-        vec_obs = torch.hstack((self.dot, cross, forward_speed, lateral_speed, yaw_rate, path_obs))
+        prev_action_obs = self.prev_actions
+        prev_reward_obs = self.prev_reward_components
+
+        vec_obs = torch.hstack(
+            (
+                self.dot,
+                cross,
+                forward_speed,
+                lateral_speed,
+                yaw_rate,
+                path_obs,
+                prev_action_obs,
+                prev_reward_obs,
+            )
+        )
         return {"policy": {"vec": vec_obs, "costmap": grid_obs}}
 
     def _get_rewards(self) -> torch.Tensor:
@@ -213,10 +229,6 @@ class PirlEnv(DirectRLEnv):
             # Направление движения (keep shape [num_envs, 1] for reward sum and memory)
             heading_val = (self.dot * self.cfg.rew_scale_heading)
 
-            # Штраф за скорость изменения yaw-команды [num_envs, 1]
-            yaw_delta = self.actions[:, 1:2] - self.prev_actions[:, 1:2]
-            rew_action_rate = self.cfg.rew_scale_action_rate * torch.square(yaw_delta)
-            
             # Штраф за близость (proximity)
             proximity_val = self.proximity.compute_penalty(self._latest_lidar_ranges_m)
             if self._latest_lidar_ranges_m is None:
@@ -240,9 +252,6 @@ class PirlEnv(DirectRLEnv):
             if self.cfg.rew_scale_reverse != 0:
                 reverse_val = float(self.cfg.rew_scale_reverse) * torch.clamp(-forward_speed, min=0.0)
                 
-            # Постоянный штраф за время
-            step_penalty_val = torch.full_like(forward_speed, self.cfg.rew_step_penalty)
-
             # 2. Итоговая награда
             reward = (
                 progress_val + 
@@ -251,9 +260,7 @@ class PirlEnv(DirectRLEnv):
                 goal_bonus_val + 
                 collision_val + 
                 reverse_val + 
-                step_penalty_val + 
-                heading_val + 
-                rew_action_rate
+                heading_val
             )
 
             # 3. Обновляем буферы состояния
@@ -271,17 +278,26 @@ class PirlEnv(DirectRLEnv):
             self.extras["log"]["rew/goal_bonus"] = torch.mean(goal_bonus_val)
             self.extras["log"]["rew/collision"] = torch.mean(collision_val)
             self.extras["log"]["rew/reverse"] = torch.mean(reverse_val)
-            self.extras["log"]["rew/step_penalty"] = torch.mean(step_penalty_val)
             self.extras["log"]["rew/heading"] = torch.mean(heading_val)
-            self.extras["log"]["rew/action_rate"] = torch.mean(rew_action_rate)
             self.extras["log"]["rew/total"] = torch.mean(reward)
             self.extras["log"]["collision/lidar"] = lidar_collision_done.float().mean()
             # Relative contribution diagnostics: helps validate reward balance numerically.
             denom = torch.mean(torch.abs(reward)) + 1e-6
-            self.extras["log"]["rew_ratio/action_rate"] = torch.mean(torch.abs(rew_action_rate)) / denom
             self.extras["log"]["rew_ratio/progress"] = torch.mean(torch.abs(progress_val)) / denom
             self.extras["log"]["rew_ratio/goal_bonus"] = torch.mean(torch.abs(goal_bonus_val)) / denom
-
+            # Save reward decomposition for next observation
+            self.prev_reward_components = torch.cat(
+                (
+                    progress_val,
+                    regress_val,
+                    proximity_val,
+                    goal_bonus_val,
+                    collision_val,
+                    reverse_val,
+                    heading_val,
+                ),
+                dim=-1,
+            )
             return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -367,3 +383,5 @@ class PirlEnv(DirectRLEnv):
         to_target_w = curr_targets_w - robot_pos_w
         self.prev_target_dist[env_ids_t] = torch.linalg.norm(to_target_w, dim=-1, keepdim=True)
         self.prev_path_idx[env_ids_t] = self.path_manager.path_idx[env_ids_t]
+        self.prev_actions[env_ids_t] = 0.0
+        self.prev_reward_components[env_ids_t] = 0.0

@@ -62,7 +62,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
             "vec": gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(5 + (path_segment_len * 2),),
+                shape=(5 + (path_segment_len * 2) + 2 + 7,),
                 dtype=np.float32,
             ),
             "costmap": gym.spaces.Box(
