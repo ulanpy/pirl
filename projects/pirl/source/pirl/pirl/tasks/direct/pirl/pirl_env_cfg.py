@@ -48,12 +48,26 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Push a new frame into history every N env steps so that K frames span ~1 s (at 60 env Hz: 4*15=60 steps)
     grid_history_interval_steps = 4
     grid_normalize = True  # normalize costs for RL input
-    # local path segment (Nav2-like: controller uses a local slice of the global path)
-    # Fewer points spaced ~2 m apart so waypoint bonus is rarer and robot does not abuse it over obstacle avoidance.
-    path_num_points = 4  # waypoints along path (spaced ~2 m)
-    path_segment_len = 5  # points provided to policy
-    path_radius_range = (0.6, 6.0)  # path from 0.6 m to 6 m from env origin
+    # --- Local path observation ---
+    # Path is generated once at reset (no replanning inside episode).
+    # Controller/reward both use nearest-point anchor on the unconsumed suffix (monotonic prune).
+    # Policy receives a fixed-size sliding window of path points in robot frame.
+    # Path discretization is metric-controlled: fixed path length + fixed spacing.
+    path_length_m = 6.0  # planned path length from start, meters
+    path_point_spacing_m = 0.10  # distance between consecutive path points, meters
+    path_num_points = int(round(path_length_m / path_point_spacing_m)) + 1  # derived point count
+    path_segment_len = 12
     path_goal_threshold = 0.4  # distance to count waypoint as reached
+    # Keep reward-history observation shape in sync with enabled reward components.
+    reward_component_names = (
+        "progress",
+        "path_error",
+        "heading",
+        "proximity",
+        "collision",
+        "reverse",
+    )
+    reward_component_dim = len(reward_component_names)
     # Curvature (ROS2-like local path: not a straight line).
     path_heading_noise_scale = 0.35  # rad per step; larger → more turns
     path_mid_turn_rad = 0.5  # extra turn in second half of path (rad), ±random
@@ -62,7 +76,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
             "vec": gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(5 + (path_segment_len * 2) + 2 + 7,),
+                shape=(5 + 2 + (path_segment_len * 2) + 2 + reward_component_dim,),
                 dtype=np.float32,
             ),
             "costmap": gym.spaces.Box(
@@ -105,7 +119,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Tables/Kettle.usd",
     )
     dyn_obstacle_slot_count = 16
-    dyn_obstacle_count_range = (6, 12)
+    dyn_obstacle_count_range = (12, 24)
     dyn_obstacle_xy_range = ((-8.0, 8.0), (-8.0, 8.0))
     dyn_obstacle_keepout_radius = 1.0
     dyn_obstacle_min_separation = 1.5
@@ -179,33 +193,20 @@ class PirlEnvCfg(DirectRLEnvCfg):
     wheel_radius = 0.03  # m (60mm diameter)
     track_width = 0.242  # m
     
-    # Reward scales calibrated for env step dt = 1/60 s.
-    # With max_lin_vel=0.5, max distance change per step is ~0.0083 m:
-    # progress step ~= +0.083 (scale 10), regress step ~= -0.017..-0.025.
+    # Core reward: r = w1*(s_t - s_{t-1}) - w2*d_path + w3*cos(delta_heading)
     rew_scale_progress = 10.0
-    rew_scale_regress = -3.0  # stronger anti-spin when drifting away from target
-    # One-time bonus when reaching each path point (sparse, should not dominate every step).
-    rew_goal_bonus = 8.0
-    # Per-step living cost must be negative to avoid "survive by spinning" behavior.
-    rew_step_penalty = 0
-    # Terminal collision penalty: high, but not so extreme that agent freezes.
+    # Cross-track distance penalty coefficient (w2).
+    rew_scale_path_error = 0.005
+    # Extra safety shaping terms (proximity/collision/reverse) are enabled.
     rew_scale_collision = -15.0
     collision_robot_radius = 0.20  # slightly larger to keep collision signal aligned with proximity
-    # Dense proximity penalty (exp-shaped); 0 with no obstacles.
-    # Penalty activates when nearest obstacle in front sector is closer than this distance.
     proximity_activation_distance = 0.9  # m
-    # Larger value -> steeper growth as obstacle gets closer.
     proximity_exponential_rate = 2.0
-    # FOV for proximity penalty. Set to 360 to cover all sides.
     proximity_front_fov_deg = 360.0
-    # Absolute cap for proximity penalty magnitude (dense shaping, per-step).
-    rew_proximity_max_penalty = -0.03
-    # Optional anti-reverse shaping (0 disables). Applies as: scale * relu(-forward_speed).
-    rew_scale_reverse = -0.2
-    rew_scale_heading = 0.005
-    # Penalty for yaw-command jitter (squared difference of normalized yaw action)
-    rew_scale_action_rate = 0.0 #-0.08
-
+    rew_proximity_max_penalty = -0.05
+    rew_scale_reverse = 0.0
+    # Heading alignment coefficient (w3): reward adds w3 * cos(delta_heading).
+    rew_scale_heading = 0.01
     robot_spawn_radius = 0.5
     spawn_angle_range: tuple[float, float] | None = (math.pi * 0.5, math.pi * 1.5)
     path_angle_range: tuple[float, float] | None = (-math.pi * 0.5, math.pi * 0.5)

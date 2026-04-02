@@ -44,16 +44,23 @@ PPODynamicsAux_default_config = {
     "dynamics_use_normalized_vec": True,
     # HJB regularizer (PINN-style) on value function.
     # If 0.0, HJB branch is disabled.
-    "hjb_loss_scale": 0.0,
+    "hjb_loss_scale": 0.5,
     # Differential-drive kinematics scales for normalized actions.
     "hjb_max_lin_vel": 0.5,
     "hjb_max_ang_vel": 3.0,
     # Running cost weights in Hamiltonian.
     "hjb_time_weight": 1.0,
     "hjb_distance_weight": 0.2,
+    "hjb_heading_weight": 0.2,
     "hjb_control_weight": 0.05,
-    # Indices inside vec observation for relative target position (x, y) in robot frame.
-    # Current vec layout: [dot, cross, vx, vy, wz, path_obs..., prev_action, prev_reward]
+    # Progress-consistent term in running cost (larger -> stronger forward preference).
+    "hjb_progress_weight": 1.0,
+    # Preferred indices in vec for HJB state [d, psi].
+    # Current vec layout:
+    # [dot, cross, vx, vy, wz, d_signed, heading_error, path_obs..., prev_action, prev_reward]
+    "hjb_vec_d_index": 5,
+    "hjb_vec_psi_index": 6,
+    # Backward-compatible aliases (deprecated).
     "hjb_vec_x_index": 5,
     "hjb_vec_y_index": 6,
 }
@@ -102,9 +109,15 @@ class PPODynamicsAuxRNN(PPO_RNN):
         self._hjb_max_ang_vel = float(self.cfg.get("hjb_max_ang_vel", 3.0))
         self._hjb_time_weight = float(self.cfg.get("hjb_time_weight", 1.0))
         self._hjb_distance_weight = float(self.cfg.get("hjb_distance_weight", 0.2))
+        self._hjb_heading_weight = float(self.cfg.get("hjb_heading_weight", 0.2))
         self._hjb_control_weight = float(self.cfg.get("hjb_control_weight", 0.05))
-        self._hjb_vec_x_index = int(self.cfg.get("hjb_vec_x_index", 5))
-        self._hjb_vec_y_index = int(self.cfg.get("hjb_vec_y_index", 6))
+        self._hjb_progress_weight = float(self.cfg.get("hjb_progress_weight", 1.0))
+        self._hjb_vec_d_index = int(
+            self.cfg.get("hjb_vec_d_index", self.cfg.get("hjb_vec_x_index", 5))
+        )
+        self._hjb_vec_psi_index = int(
+            self.cfg.get("hjb_vec_psi_index", self.cfg.get("hjb_vec_y_index", 6))
+        )
 
         # Vec slice in flattened Dict(obs); same layout as recurrent_models / skrl preprocessor.
         self._vec_start, self._vec_size, _, _ = get_vec_costmap_layout(self.observation_space)
@@ -260,8 +273,8 @@ class PPODynamicsAuxRNN(PPO_RNN):
         """Scaled mean squared Hamiltonian residual w.r.t. raw ``vec`` slice (FP32); zero if disabled."""
         if self._hjb_loss_scale <= 0.0:
             return torch.tensor(0.0, device=self.device)
-        if self._hjb_vec_x_index < 0 or self._hjb_vec_y_index < 0:
-            raise ValueError("hjb_vec_x_index and hjb_vec_y_index must be non-negative.")
+        if self._hjb_vec_d_index < 0 or self._hjb_vec_psi_index < 0:
+            raise ValueError("hjb_vec_d_index and hjb_vec_psi_index must be non-negative.")
         with torch.autocast(device_type=self._device_type, enabled=False):
             hjb_states_raw = sampled_states_raw.detach().clone().float().requires_grad_(True)
             hjb_states = self._state_preprocessor(hjb_states_raw, train=False)
@@ -282,27 +295,34 @@ class PPODynamicsAuxRNN(PPO_RNN):
             )[0]
             grad_vec = torch.zeros_like(hjb_vec_raw) if grad_vec_full is None else grad_vec_full
             vec = hjb_vec_raw
-            if vec.shape[1] <= max(self._hjb_vec_x_index, self._hjb_vec_y_index):
+            if vec.shape[1] <= max(self._hjb_vec_d_index, self._hjb_vec_psi_index):
                 raise ValueError(
                     "HJB vec indices out of range for current vec layout: "
-                    f"vec_dim={vec.shape[1]}, x_idx={self._hjb_vec_x_index}, y_idx={self._hjb_vec_y_index}"
+                    f"vec_dim={vec.shape[1]}, d_idx={self._hjb_vec_d_index}, psi_idx={self._hjb_vec_psi_index}"
                 )
-            x_rel = vec[:, self._hjb_vec_x_index : self._hjb_vec_x_index + 1]
-            y_rel = vec[:, self._hjb_vec_y_index : self._hjb_vec_y_index + 1]
-            dVdx = grad_vec[:, self._hjb_vec_x_index : self._hjb_vec_x_index + 1]
-            dVdy = grad_vec[:, self._hjb_vec_y_index : self._hjb_vec_y_index + 1]
+            # HJB state: x = [d, psi], where d is signed cross-track error and psi is heading error.
+            d_err = vec[:, self._hjb_vec_d_index : self._hjb_vec_d_index + 1]
+            psi_err = vec[:, self._hjb_vec_psi_index : self._hjb_vec_psi_index + 1]
+            dVdd = grad_vec[:, self._hjb_vec_d_index : self._hjb_vec_d_index + 1]
+            dVdpsi = grad_vec[:, self._hjb_vec_psi_index : self._hjb_vec_psi_index + 1]
             v = sampled_actions[:, 0:1].float() * self._hjb_max_lin_vel
             w = sampled_actions[:, 1:2].float() * self._hjb_max_ang_vel
-            x_dot = -v + w * y_rel
-            y_dot = -w * x_rel
-            dist = torch.sqrt(x_rel * x_rel + y_rel * y_rel + 1e-6)
+            # Signed-error kinematics (small-curvature approximation in local path frame):
+            # d_dot = v * sin(psi), psi_dot = w.
+            d_dot = v * torch.sin(psi_err)
+            psi_dot = w
+            # Running cost consistent with reward priorities:
+            # penalize cross-track and heading error, control effort,
+            # and reward forward progress along heading target via -v*cos(psi).
             control_cost = v * v + 0.1 * (w * w)
             running_cost = (
                 self._hjb_time_weight
-                + self._hjb_distance_weight * dist
+                + self._hjb_distance_weight * (d_err * d_err)
+                + self._hjb_heading_weight * (1.0 - torch.cos(psi_err))
                 + self._hjb_control_weight * control_cost
+                - self._hjb_progress_weight * (v * torch.cos(psi_err))
             )
-            hamiltonian = running_cost + dVdx * x_dot + dVdy * y_dot
+            hamiltonian = running_cost + dVdd * d_dot + dVdpsi * psi_dot
             return self._hjb_loss_scale * torch.mean(hamiltonian * hamiltonian)
 
     def _dynamics_to_policy_grad_norm(self, dynamics_loss: torch.Tensor) -> float:

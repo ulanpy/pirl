@@ -27,8 +27,11 @@ class PirlEnv(DirectRLEnv):
         # Initialize buffers
         self.commands = torch.zeros((self.num_envs, 3), device=self.device)
         self.yaws = torch.zeros((self.num_envs, 1), device=self.device)
-        self.prev_target_dist = torch.zeros((self.num_envs, 1), device=self.device)
-        self.prev_path_idx = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
+        self.prev_path_s = torch.zeros((self.num_envs, 1), device=self.device)
+        self.curr_path_s = torch.zeros((self.num_envs, 1), device=self.device)
+        self.curr_path_error = torch.zeros((self.num_envs, 1), device=self.device)
+        self.curr_path_error_signed = torch.zeros((self.num_envs, 1), device=self.device)
+        self.path_heading_cos = torch.zeros((self.num_envs, 1), device=self.device)
         self.up_dir = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(self.num_envs, 1)
         self.marker_offset = torch.tensor([0.0, 0.0, 0.5], device=self.device).repeat(self.num_envs, 1)
 
@@ -44,7 +47,9 @@ class PirlEnv(DirectRLEnv):
         self.actions = torch.zeros((self.num_envs, 2), device=self.device)
         self.prev_actions = torch.zeros((self.num_envs, 2), device=self.device)
         # Info to pass into recurrent model: previous action + reward breakdown
-        self.prev_reward_components = torch.zeros((self.num_envs, 7), device=self.device)
+        self.prev_reward_components = torch.zeros(
+            (self.num_envs, int(self.cfg.reward_component_dim)), device=self.device
+        )
         # IRA setup deferred to first reset() so NavMesh bakes after sim has run and scene is composed.
 
     def _setup_scene(self):
@@ -163,18 +168,22 @@ class PirlEnv(DirectRLEnv):
             torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         )
         
-        # Update commands from local path target
+        # Update path anchors and local geometric targets.
         robot_pos_w = self.robot.data.root_pos_w[:, :2]
-        self.commands, self.yaws, curr_idx = self.path_manager.update_commands(robot_pos_w)
-        # store current distance to target for progress reward
-        curr_targets_w = self.path_manager.path_points_w[torch.arange(self.num_envs, device=self.device), curr_idx]
-        to_target_w = curr_targets_w - robot_pos_w
-        self.curr_target_dist = torch.linalg.norm(to_target_w, dim=-1, keepdim=True)
+        (
+            self.commands,
+            self.yaws,
+            curr_idx,
+            self.curr_path_s,
+            self.curr_path_error,
+            self.curr_path_error_signed,
+            tangent_heading,
+            heading_target,
+        ) = self.path_manager.update_commands(robot_pos_w)
+        # Final goal distance for termination diagnostics
+        final_targets_w = self.path_manager.path_points_w[:, -1]
+        self.final_goal_dist = torch.linalg.norm(final_targets_w - robot_pos_w, dim=-1, keepdim=True)
 
-        # Dot product: alignment (-1 to 1)
-        self.dot = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
-        # Cross product (z-component): turn direction
-        cross = (self.forwards[:, 0] * self.commands[:, 1] - self.forwards[:, 1] * self.commands[:, 0]).unsqueeze(-1)
         # Ego-motion in body frame
         forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
         lateral_speed = self.robot.data.root_com_lin_vel_b[:, 1].unsqueeze(-1)
@@ -197,21 +206,35 @@ class PirlEnv(DirectRLEnv):
         self._latest_lidar_ranges_m = lidar_ranges_m
 
         robot_yaw = torch.atan2(self.forwards[:, 1], self.forwards[:, 0])
+        heading_error = torch.atan2(
+            torch.sin(robot_yaw.unsqueeze(-1) - heading_target),
+            torch.cos(robot_yaw.unsqueeze(-1) - heading_target),
+        )
+        # Heading reward is measured against lookahead-point bearing (last point in local window).
+        self.path_heading_cos = torch.cos(heading_error)
         grid_obs = self.costmap.build_image(lidar_ranges_m, robot_pos_w, robot_yaw)
 
-        # Local path segment in robot frame
+        # path_obs: fixed-size sliding segment of the frozen episode path in base_link (x,y), flattened.
+        # Anchor index is re-selected every tick by nearest-point prune; no replanning in this setup.
         path_obs = self.path_manager.get_segment(robot_pos_w, self.robot.data.root_quat_w, curr_idx)
 
         prev_action_obs = self.prev_actions
         prev_reward_obs = self.prev_reward_components
 
+        # Observation heading relation features are computed from command direction.
+        dot_cmd = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
+        cross_cmd = (
+            self.forwards[:, 0] * self.commands[:, 1] - self.forwards[:, 1] * self.commands[:, 0]
+        ).unsqueeze(-1)
         vec_obs = torch.hstack(
             (
-                self.dot,
-                cross,
+                dot_cmd,
+                cross_cmd,
                 forward_speed,
                 lateral_speed,
                 yaw_rate,
+                self.curr_path_error_signed,
+                heading_error,
                 path_obs,
                 prev_action_obs,
                 prev_reward_obs,
@@ -220,16 +243,14 @@ class PirlEnv(DirectRLEnv):
         return {"policy": {"vec": vec_obs, "costmap": grid_obs}}
 
     def _get_rewards(self) -> torch.Tensor:
-            # 1. Вычисляем отдельные компоненты
-            # Прогресс к цели: поощряем приближение и слабо штрафуем регресс (anti-spin).
-            delta_dist = self.prev_target_dist - self.curr_target_dist
-            progress_val = torch.clamp(delta_dist, min=0.0) * float(self.cfg.rew_scale_progress)
-            regress_val = torch.clamp(-delta_dist, min=0.0) * float(getattr(self.cfg, "rew_scale_regress", 0.0))
-            
-            # Направление движения (keep shape [num_envs, 1] for reward sum and memory)
-            heading_val = (self.dot * self.cfg.rew_scale_heading)
-
-            # Штраф за близость (proximity)
+            # Core path-following reward:
+            # r_core = w1*(s_t - s_{t-1}) - w2*d_path + w3*cos(delta_heading)
+            delta_s = self.curr_path_s - self.prev_path_s
+            progress_val = delta_s * float(self.cfg.rew_scale_progress)
+            cte_val = -self.curr_path_error * float(self.cfg.rew_scale_path_error)
+            forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
+            heading_val = self.path_heading_cos * float(self.cfg.rew_scale_heading)
+            # Safety shaping (kept to preserve obstacle avoidance behavior).
             proximity_val = self.proximity.compute_penalty(self._latest_lidar_ranges_m)
             if self._latest_lidar_ranges_m is None:
                 lidar_collision_done = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
@@ -237,67 +258,56 @@ class PirlEnv(DirectRLEnv):
                 lidar_collision_done = (
                     self._latest_lidar_ranges_m.min(dim=1)[0] < float(self.cfg.collision_robot_radius)
                 )
-            collision_done = lidar_collision_done
-            
-            # Бонус за достижение точки пути
-            reached_goal = self.path_manager.path_idx > self.prev_path_idx
-            goal_bonus_val = reached_goal.unsqueeze(dim=-1).float() * self.cfg.rew_goal_bonus
-            
-            # Явный collision penalty для корректного credit assignment.
-            collision_val = collision_done.unsqueeze(-1).float() * float(self.cfg.rew_scale_collision)
-
-            # Скорость и реверс
-            forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
+            collision_val = lidar_collision_done.unsqueeze(-1).float() * float(self.cfg.rew_scale_collision)
             reverse_val = torch.zeros_like(forward_speed)
             if self.cfg.rew_scale_reverse != 0:
                 reverse_val = float(self.cfg.rew_scale_reverse) * torch.clamp(-forward_speed, min=0.0)
-                
-            # 2. Итоговая награда
             reward = (
-                progress_val + 
-                regress_val +
-                proximity_val + 
-                goal_bonus_val + 
-                collision_val + 
-                reverse_val + 
-                heading_val
+                progress_val +
+                cte_val +
+                heading_val +
+                proximity_val +
+                collision_val +
+                reverse_val
             )
 
-            # 3. Обновляем буферы состояния
-            self.prev_target_dist = self.curr_target_dist
-            self.prev_path_idx = self.path_manager.path_idx.clone()
+            self.prev_path_s.copy_(self.curr_path_s)
 
-            # 4. Reward Breakdown для логирования (TensorBoard/WandB)
-            # Мы используем .mean(), чтобы получить среднее значение по всем параллельным средам
             if "log" not in self.extras:
                 self.extras["log"] = {}
             
             self.extras["log"]["rew/progress"] = torch.mean(progress_val)
-            self.extras["log"]["rew/regress"] = torch.mean(regress_val)
+            self.extras["log"]["rew/path_error"] = torch.mean(cte_val)
+            self.extras["log"]["rew/heading"] = torch.mean(heading_val)
             self.extras["log"]["rew/proximity"] = torch.mean(proximity_val)
-            self.extras["log"]["rew/goal_bonus"] = torch.mean(goal_bonus_val)
             self.extras["log"]["rew/collision"] = torch.mean(collision_val)
             self.extras["log"]["rew/reverse"] = torch.mean(reverse_val)
-            self.extras["log"]["rew/heading"] = torch.mean(heading_val)
             self.extras["log"]["rew/total"] = torch.mean(reward)
             self.extras["log"]["collision/lidar"] = lidar_collision_done.float().mean()
-            # Relative contribution diagnostics: helps validate reward balance numerically.
+            # Diagnostics for forward-speed sign consistency against commanded linear speed.
+            cmd_lin = self.actions[:, 0].unsqueeze(-1) * float(self.cfg.max_lin_vel)
+            v_mean = torch.mean(forward_speed)
+            c_mean = torch.mean(cmd_lin)
+            v_centered = forward_speed - v_mean
+            c_centered = cmd_lin - c_mean
+            corr = torch.mean(v_centered * c_centered) / (
+                torch.std(forward_speed).clamp(min=1e-6) * torch.std(cmd_lin).clamp(min=1e-6)
+            )
+            self.extras["log"]["debug/v_fwd_mean"] = v_mean
+            self.extras["log"]["debug/cmd_lin_mean"] = c_mean
+            self.extras["log"]["debug/v_fwd_cmd_corr"] = corr
             denom = torch.mean(torch.abs(reward)) + 1e-6
             self.extras["log"]["rew_ratio/progress"] = torch.mean(torch.abs(progress_val)) / denom
-            self.extras["log"]["rew_ratio/goal_bonus"] = torch.mean(torch.abs(goal_bonus_val)) / denom
-            # Save reward decomposition for next observation
-            self.prev_reward_components = torch.cat(
-                (
-                    progress_val,
-                    regress_val,
-                    proximity_val,
-                    goal_bonus_val,
-                    collision_val,
-                    reverse_val,
-                    heading_val,
-                ),
-                dim=-1,
+            self.extras["log"]["rew_ratio/path_error"] = torch.mean(torch.abs(cte_val)) / denom
+            reward_components = (
+                progress_val,
+                cte_val,
+                heading_val,
+                proximity_val,
+                collision_val,
+                reverse_val,
             )
+            self.prev_reward_components = torch.cat(reward_components, dim=-1)
             return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -310,21 +320,14 @@ class PirlEnv(DirectRLEnv):
             lidar_collision_done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         collision_done = lidar_collision_done
         # Success termination: final waypoint reached.
-        last_idx = self.cfg.path_num_points - 1
-        at_final_waypoint = self.path_manager.path_idx >= last_idx
-        if hasattr(self, "curr_target_dist"):
-            final_reached = at_final_waypoint & (
-                self.curr_target_dist.squeeze(-1) < float(self.cfg.path_goal_threshold)
-            )
+        if hasattr(self, "final_goal_dist"):
+            final_reached = self.final_goal_dist.squeeze(-1) < float(self.cfg.path_goal_threshold)
         else:
             # Fallback for startup ordering (should rarely trigger).
             robot_pos_w = self.robot.data.root_pos_w[:, :2]
-            curr_idx = torch.clamp(self.path_manager.path_idx, max=last_idx)
-            curr_targets_w = self.path_manager.path_points_w[
-                torch.arange(self.num_envs, device=self.device), curr_idx
-            ]
-            dist = torch.linalg.norm(curr_targets_w - robot_pos_w, dim=-1)
-            final_reached = at_final_waypoint & (dist < float(self.cfg.path_goal_threshold))
+            final_targets_w = self.path_manager.path_points_w[:, -1]
+            dist = torch.linalg.norm(final_targets_w - robot_pos_w, dim=-1)
+            final_reached = dist < float(self.cfg.path_goal_threshold)
         die = collision_done | final_reached
         if "log" not in self.extras:
             self.extras["log"] = {}
@@ -376,12 +379,19 @@ class PirlEnv(DirectRLEnv):
         # Reset path points (dynamic-only setup: no static obstacle constraints).
         env_origins = self.scene.env_origins[env_ids_t, :2]
         self.path_manager.reset(env_ids_seq, env_origins)
-        # Reset progress tracking
+        # Reset progress-tracking buffers (avoid startup spikes for newly reset envs).
         robot_pos_w = self.robot.data.root_pos_w[env_ids_t, :2]
-        curr_idx = self.path_manager.path_idx[env_ids_t]
-        curr_targets_w = self.path_manager.path_points_w[env_ids_t, curr_idx]
-        to_target_w = curr_targets_w - robot_pos_w
-        self.prev_target_dist[env_ids_t] = torch.linalg.norm(to_target_w, dim=-1, keepdim=True)
-        self.prev_path_idx[env_ids_t] = self.path_manager.path_idx[env_ids_t]
+        path_points = self.path_manager.path_points_w[env_ids_t]
+        d2 = torch.sum((path_points - robot_pos_w.unsqueeze(1)) ** 2, dim=-1)
+        nearest_idx = torch.argmin(d2, dim=1)
+        self.path_manager.path_idx[env_ids_t] = nearest_idx
+        nearest_s = self.path_manager.path_s[env_ids_t, nearest_idx].unsqueeze(-1)
+        self.prev_path_s[env_ids_t] = nearest_s
+        self.curr_path_s[env_ids_t] = nearest_s
+        self.curr_path_error[env_ids_t] = torch.sqrt(
+            torch.gather(d2, dim=1, index=nearest_idx.unsqueeze(1)).clamp(min=0.0)
+        )
+        self.curr_path_error_signed[env_ids_t] = 0.0
+        self.path_heading_cos[env_ids_t] = 0.0
         self.prev_actions[env_ids_t] = 0.0
         self.prev_reward_components[env_ids_t] = 0.0
