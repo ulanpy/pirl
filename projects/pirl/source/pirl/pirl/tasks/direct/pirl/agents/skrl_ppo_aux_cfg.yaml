@@ -69,7 +69,7 @@ agent:
   hjb_heading_weight: 0.2
   hjb_control_weight: 0.05
   hjb_progress_weight: 1.0
-  # vec layout: [dot, cross, vx, vy, wz, d_signed, heading_error, ...]
+  # vec layout: [dot, cross, cross-track-error, heading-error, vx, vy, wz, d_signed, heading_error, ...]
   hjb_vec_d_index: 5
   hjb_vec_psi_index: 6
   time_limit_bootstrap: False

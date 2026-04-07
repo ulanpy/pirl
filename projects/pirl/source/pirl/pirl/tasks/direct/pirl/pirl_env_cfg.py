@@ -196,7 +196,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Core reward: r = w1*(s_t - s_{t-1}) - w2*d_path + w3*cos(delta_heading)
     rew_scale_progress = 10.0
     # Cross-track distance penalty coefficient (w2).
-    rew_scale_path_error = 0.005
+    rew_scale_path_error = 0.005 
     # Extra safety shaping terms (proximity/collision/reverse) are enabled.
     rew_scale_collision = -15.0
     collision_robot_radius = 0.20  # slightly larger to keep collision signal aligned with proximity
