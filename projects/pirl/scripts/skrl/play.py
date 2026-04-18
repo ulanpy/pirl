@@ -13,9 +13,15 @@ a more user-friendly way.
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import os
 import sys
 
 from isaaclab.app import AppLauncher
+
+# Default public IP advertised to WebRTC clients when --livestream=1 is used.
+# Matches this host's Tailscale address so remote clients can reach media UDP directly.
+# Override per-invocation with --public_ip, or globally via the PUBLIC_IP env var.
+DEFAULT_PUBLIC_IP = "100.118.210.31"
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Play a checkpoint of an RL agent from skrl.")
@@ -57,6 +63,16 @@ parser.add_argument(
     help="The RL algorithm used for training the skrl agent.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--public_ip",
+    type=str,
+    default=None,
+    help=(
+        "Public IP advertised to the WebRTC client when running with --livestream=1. "
+        f"If unset, falls back to the PUBLIC_IP env var, then to {DEFAULT_PUBLIC_IP}. "
+        "Ignored for --livestream=2."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -66,6 +82,13 @@ args_cli, hydra_args = parser.parse_known_args()
 if args_cli.video:
     args_cli.enable_cameras = True
 
+# Resolve PUBLIC_IP for WebRTC livestream=1 before AppLauncher reads the env var.
+# Priority: --public_ip CLI > PUBLIC_IP env > DEFAULT_PUBLIC_IP.
+if getattr(args_cli, "livestream", -1) == 1:
+    resolved_public_ip = args_cli.public_ip or os.environ.get("PUBLIC_IP") or DEFAULT_PUBLIC_IP
+    os.environ["PUBLIC_IP"] = resolved_public_ip
+    print(f"[INFO][play.py]: livestream=1, advertising publicEndpointAddress={resolved_public_ip}")
+
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 # launch omniverse app
@@ -74,7 +97,6 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
-import os
 import random
 import time
 import copy
