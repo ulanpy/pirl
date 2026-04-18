@@ -19,7 +19,7 @@ $$
 HJB is used to shape critic geometry so that local value gradients stay consistent
 with path-tracking error dynamics.
 
-## 2) HJB state and control used now
+## 2) HJB state and control in current residual
 
 Current HJB state is reduced to:
 
@@ -32,16 +32,21 @@ where:
 - $d$: signed cross-track error (meters),
 - $\psi$: heading error to lookahead heading target (radians, wrapped to $[-\pi,\pi]$).
 
-Control:
+Control in the PDE residual is configurable by mode:
+
+- `hjb_hamiltonian_mode = "policy"`: use current policy control \(u_\pi=[v,\omega]\),
+- `hjb_hamiltonian_mode = "optimal"`: use analytic minimizer \(u^*\) from \(\partial \mathcal H/\partial u=0\).
+
+For the optimal mode:
 
 $$
-u = \begin{bmatrix} v \\ \omega \end{bmatrix}
-$$
-
-with:
-
-$$
-v = a_{lin}\,v_{max}, \qquad \omega = a_{yaw}\,\omega_{max}
+u^*(x,\nabla V)=
+\begin{bmatrix}
+v^* \\
+\omega^*
+\end{bmatrix},
+\quad
+\frac{\partial \mathcal H}{\partial u}=0
 $$
 
 ## 3) Error-state dynamics used in residual
@@ -100,12 +105,26 @@ Interpretation:
 - control term: regularize aggressive commands,
 - $-w_p v\cos\psi$: encourage forward progress toward heading target.
 
+For this quadratic-in-control Hamiltonian, the unconstrained minimizer is:
+
+$$
+v^* = \frac{w_p\cos\psi - \frac{\partial V}{\partial d}\sin\psi}{2w_u},
+\qquad
+\omega^* = -\frac{1}{0.2w_u}\frac{\partial V}{\partial \psi}
+$$
+
+Then we evaluate (optimal mode):
+
+$$
+\mathcal H^*(x,\nabla V) := \mathcal H(x,u^*(x,\nabla V),\nabla V)
+$$
+
 Residual loss:
 
 $$
 \mathcal{L}_{hjb}
 =
-\lambda_{hjb}\,\mathbb{E}\left[\mathcal{H}^2\right]
+\lambda_{hjb}\,\mathbb{E}\left[\mathcal{H}_{mode}^2\right]
 $$
 
 ## 5) Input indices in current `vec`
@@ -143,7 +162,8 @@ Main HJB config in `skrl_ppo_aux_cfg.yaml`:
 - `hjb_heading_weight` $\rightarrow w_\psi$
 - `hjb_control_weight` $\rightarrow w_u$
 - `hjb_progress_weight` $\rightarrow w_p$
-- `hjb_max_lin_vel`, `hjb_max_ang_vel` for action-to-$(v,\omega)$ scaling.
+- `hjb_hamiltonian_mode` $\rightarrow$ choice of \(u\) in Hamiltonian (`policy` or `optimal`)
+- `hjb_max_lin_vel`, `hjb_max_ang_vel` are kept in config for backward compatibility.
 
 ## 8) Practical expectations
 
