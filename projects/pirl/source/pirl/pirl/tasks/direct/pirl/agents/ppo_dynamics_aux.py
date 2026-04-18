@@ -55,14 +55,15 @@ PPODynamicsAux_default_config = {
     "hjb_control_weight": 0.05,
     # Progress-consistent term in running cost (larger -> stronger forward preference).
     "hjb_progress_weight": 1.0,
+    # Hamiltonian mode:
+    # - "policy": evaluate H(x, u_policy, grad V)
+    # - "optimal": evaluate H*(x, grad V) using analytic argmin dH/du = 0
+    "hjb_hamiltonian_mode": "optimal",
     # Preferred indices in vec for HJB state [d, psi].
     # Current vec layout:
     # [dot, cross, vx, vy, wz, d_signed, heading_error, path_obs..., prev_action, prev_reward]
     "hjb_vec_d_index": 5,
     "hjb_vec_psi_index": 6,
-    # Backward-compatible aliases (deprecated).
-    "hjb_vec_x_index": 5,
-    "hjb_vec_y_index": 6,
 }
 
 
@@ -112,12 +113,14 @@ class PPODynamicsAuxRNN(PPO_RNN):
         self._hjb_heading_weight = float(self.cfg.get("hjb_heading_weight", 0.2))
         self._hjb_control_weight = float(self.cfg.get("hjb_control_weight", 0.05))
         self._hjb_progress_weight = float(self.cfg.get("hjb_progress_weight", 1.0))
-        self._hjb_vec_d_index = int(
-            self.cfg.get("hjb_vec_d_index", self.cfg.get("hjb_vec_x_index", 5))
-        )
-        self._hjb_vec_psi_index = int(
-            self.cfg.get("hjb_vec_psi_index", self.cfg.get("hjb_vec_y_index", 6))
-        )
+        self._hjb_hamiltonian_mode = str(self.cfg.get("hjb_hamiltonian_mode", "optimal")).strip().lower()
+        if self._hjb_hamiltonian_mode not in ("policy", "optimal"):
+            raise ValueError(
+                "hjb_hamiltonian_mode must be one of {'policy', 'optimal'}, "
+                f"got: {self._hjb_hamiltonian_mode}"
+            )
+        self._hjb_vec_d_index = int(self.cfg.get("hjb_vec_d_index", 5))
+        self._hjb_vec_psi_index = int(self.cfg.get("hjb_vec_psi_index", 6))
 
         # Vec slice in flattened Dict(obs); same layout as recurrent_models / skrl preprocessor.
         self._vec_start, self._vec_size, _, _ = get_vec_costmap_layout(self.observation_space)
@@ -305,22 +308,38 @@ class PPODynamicsAuxRNN(PPO_RNN):
             psi_err = vec[:, self._hjb_vec_psi_index : self._hjb_vec_psi_index + 1]
             dVdd = grad_vec[:, self._hjb_vec_d_index : self._hjb_vec_d_index + 1]
             dVdpsi = grad_vec[:, self._hjb_vec_psi_index : self._hjb_vec_psi_index + 1]
-            v = sampled_actions[:, 0:1].float() * self._hjb_max_lin_vel
-            w = sampled_actions[:, 1:2].float() * self._hjb_max_ang_vel
+            control_w_t = torch.tensor(
+                float(self._hjb_control_weight),
+                device=self.device,
+                dtype=torch.float32,
+            ).clamp(min=1e-6)
+            if self._hjb_hamiltonian_mode == "optimal":
+                # Hamiltonian minimization (no CBF): solve dH/du = 0 for unconstrained u* = [v*, w*].
+                # H(v, w) = l(d, psi, v, w) + dV/dd * d_dot + dV/dpsi * psi_dot
+                # with d_dot = v*sin(psi), psi_dot = w and
+                # l = w_t + w_d*d^2 + w_psi*(1-cos(psi)) + w_u*(v^2 + 0.1*w^2) - w_p*v*cos(psi)
+                v_ctrl = (
+                    self._hjb_progress_weight * torch.cos(psi_err) - dVdd * torch.sin(psi_err)
+                ) / (2.0 * control_w_t)
+                w_ctrl = -dVdpsi / (0.2 * control_w_t)
+            else:
+                # Policy-evaluated Hamiltonian (on-policy residual).
+                v_ctrl = sampled_actions[:, 0:1].float() * self._hjb_max_lin_vel
+                w_ctrl = sampled_actions[:, 1:2].float() * self._hjb_max_ang_vel
             # Signed-error kinematics (small-curvature approximation in local path frame):
             # d_dot = v * sin(psi), psi_dot = w.
-            d_dot = v * torch.sin(psi_err)
-            psi_dot = w
+            d_dot = v_ctrl * torch.sin(psi_err)
+            psi_dot = w_ctrl
             # Running cost consistent with reward priorities:
             # penalize cross-track and heading error, control effort,
             # and reward forward progress along heading target via -v*cos(psi).
-            control_cost = v * v + 0.1 * (w * w)
+            control_cost = v_ctrl * v_ctrl + 0.1 * (w_ctrl * w_ctrl)
             running_cost = (
                 self._hjb_time_weight
                 + self._hjb_distance_weight * (d_err * d_err)
                 + self._hjb_heading_weight * (1.0 - torch.cos(psi_err))
-                + self._hjb_control_weight * control_cost
-                - self._hjb_progress_weight * (v * torch.cos(psi_err))
+                + control_w_t * control_cost
+                - self._hjb_progress_weight * (v_ctrl * torch.cos(psi_err))
             )
             hamiltonian = running_cost + dVdd * d_dot + dVdpsi * psi_dot
             return self._hjb_loss_scale * torch.mean(hamiltonian * hamiltonian)
