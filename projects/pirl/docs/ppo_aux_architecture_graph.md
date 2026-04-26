@@ -1,4 +1,4 @@
-# PPO Aux Architecture Graph
+# PPO + HJB Architecture Graph
 
 ```mermaid
 flowchart TD
@@ -45,49 +45,44 @@ flowchart TD
     CF --> VH["Value head: Linear 128->1"]
     VH --> VOUT["V(s)"]
 
-    %% ===================== AUX LOSSES IN AGENT =====================
-    subgraph AUX["PPODynamicsAuxRNN training additions"]
-        D0["dynamics head enabled (scale=0.02)"]
-        D1["Input: [vec_t, action_t]"]
-        D2["MLP: (V+2)->128->128->5"]
-        D3["Target: delta vec[:5] = vec_{t+1}[:5]-vec_t[:5]"]
-        D4["Loss: MSE * dynamics_loss_scale"]
-        H0["HJB loss scale = 0.0 (disabled)"]
+    %% ===================== HJB BRANCH IN AGENT =====================
+    subgraph HJB["PPOHjbRNN training additions"]
+        H1["HJB state: x = [d, psi] from raw vec"]
+        H2["grad_x V via autograd on critic input"]
+        H3["Hamiltonian H_r(x, u, grad V) = -l + grad V . f - rho V"]
+        H4["Loss: hjb_loss_scale * E[H_r^2]"]
     end
 
-    L --> D1
-    API --> D1
-    D1 --> D2 --> D4
-    D3 --> D4
+    L --> H1
+    VOUT --> H2
+    H1 --> H3
+    H2 --> H3
+    H3 --> H4
 
     %% ===================== LOSSES & GRADIENT FLOW =====================
     subgraph LOSSES["PPO update losses (training)"]
         PL["L_policy (PPO clipped surrogate)"]
         EL["L_entropy"]
         VL["L_value (MSE to returns, with value clipping)"]
-        DL["L_dynamics (aux MSE on vec delta)"]
-        HL["L_HJB (disabled: scale=0.0)"]
-        TL["L_total = PL + EL + VL + DL + HL"]
+        HL["L_HJB (squared Bellman residual on critic)"]
+        TL["L_total = PL + EL + VL + HL"]
     end
 
     API --> PL
     API --> EL
     VOUT --> VL
-    D4 --> DL
+    H4 --> HL
 
     PL --> TL
     EL --> TL
     VL --> TL
-    DL --> TL
     HL --> TL
 
     TL --> GP["Backprop to policy parameters"]
     TL --> GV["Backprop to value parameters"]
-    TL --> GD["Backprop to dynamics head parameters"]
 
-    GP --> NOTE1["policy grads: PPO + entropy + dynamics bridge"]
-    GV --> NOTE2["value grads: critic regression only"]
-    GD --> NOTE3["dynamics grads: aux model + shared optimizer group"]
+    GP --> NOTE1["policy grads: PPO + entropy"]
+    GV --> NOTE2["value grads: critic regression + HJB residual"]
 ```
 
 ## Mathematical note: `separate: True` and gradient flow
@@ -108,75 +103,35 @@ So there is no shared actor-critic backbone in this setup.
 \mathcal{L}_{\text{total}}
 =
 \mathcal{L}_{\pi}
- \mathcal{L}_{\text{ent}}
- \mathcal{L}_{V}
- \mathcal{L}_{\text{dyn}}
- \mathcal{L}_{\text{HJB}}
++ \mathcal{L}_{\text{ent}}
++ \mathcal{L}_{V}
++ \mathcal{L}_{\text{HJB}}
 \]
 
-Current config has \(\mathcal{L}_{\text{HJB}} = 0\).
+If `hjb_loss_scale = 0`, the last term vanishes and the agent reduces to plain PPO-RNN.
 
 ### Parameter updates
 
+Actor parameters \(\theta\) receive gradients from \(\mathcal L_\pi + \mathcal L_{\text{ent}}\):
+
 \[
 \theta \leftarrow \theta - \eta \nabla_\theta
-\left(
-\mathcal{L}_{\pi}
- \mathcal{L}_{\text{ent}}
- \mathcal{L}_{\text{dyn}}
-\right)
+\left(\mathcal{L}_{\pi} + \mathcal{L}_{\text{ent}}\right)
 \]
+
+Critic parameters \(\phi\) receive gradients from \(\mathcal L_V + \mathcal L_{\text{HJB}}\):
 
 \[
-\phi \leftarrow \phi - \eta \nabla_\phi \mathcal{L}_{V}
+\phi \leftarrow \phi - \eta \nabla_\phi
+\left(\mathcal{L}_{V} + \mathcal{L}_{\text{HJB}}\right)
 \]
 
-Dynamics-head parameters \(\psi\):
-
-\[
-\psi \leftarrow \psi - \eta \nabla_\psi \mathcal{L}_{\text{dyn}}
-\]
-
-### Why dynamics loss can also update actor
-
-In code, dynamics branch uses:
-
-\[
-a_{\text{dyn}}
-=
-a_{\text{sampled}}
-\left(\mu_\theta - \text{stopgrad}(\mu_\theta)\right)
-\]
-
-Forward value is equal to \(a_{\text{sampled}}\), but gradient flows through \(\mu_\theta\).
-Therefore, \(\mathcal{L}_{\text{dyn}}\) contributes to actor gradients.
-
-### Simple toy example
-
-Assume at one minibatch:
-
-\[
-\mathcal{L}_{\pi}=0.8,\quad
-\mathcal{L}_{\text{ent}}=-0.02,\quad
-\mathcal{L}_{V}=0.5,\quad
-\mathcal{L}_{\text{dyn}}=0.1
-\]
-
-\[
-\mathcal{L}_{\text{total}}=1.38
-\]
-
-But gradients are not "shared equally":
-
-- actor receives gradients from \(\mathcal{L}_{\pi}, \mathcal{L}_{\text{ent}}, \mathcal{L}_{\text{dyn}}\),
-- critic receives gradients from \(\mathcal{L}_{V}\) only,
-- dynamics head receives gradients from \(\mathcal{L}_{\text{dyn}}\) only.
-
-So `separate: True` means separate parameter sets and separate gradient paths, even though all losses are summed into one optimizer step.
+So `separate: True` means separate parameter sets and separate gradient paths,
+even though all losses are summed into one optimizer step.
 
 ### If backbone were truly shared
 
-Shared actor-critic would look like:
+A shared actor-critic backbone would look like:
 
 \[
 z_t = f_\omega(s_t),\quad
@@ -184,6 +139,6 @@ z_t = f_\omega(s_t),\quad
 V_\phi(z_t)
 \]
 
-Then shared backbone parameters \(\omega\) would receive combined gradients from both policy and value losses.
-That is not the case in the current configuration.
-
+Then shared backbone parameters \(\omega\) would receive combined gradients from both
+policy and value losses (and from HJB through the critic head). That is not the case
+in the current configuration.

@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from .ppo_dynamics_aux import PPODynamicsAux, PPODynamicsAuxRNN, PPODynamicsAux_default_config
+from .ppo_hjb_rnn import PPOHjbRNN, PPOHjbRNN_default_config
 from .recurrent_models import (
     FeedForwardDeterministicValue,
     RecurrentDeterministicValue,

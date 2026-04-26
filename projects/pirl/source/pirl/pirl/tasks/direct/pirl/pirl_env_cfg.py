@@ -44,7 +44,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Nav2 InflationLayer defaults: inflation_radius=0.55, cost_scaling_factor=10.0
     grid_inflation_radius_m = 0.55  # inflation radius (m); Nav2 default 0.55 (use ~0.15 for tighter inflation)
     grid_cost_scaling_factor = 10.0  # exponential decay; Nav2 default 10.0
-    grid_history_len = 4  # number of stacked costmaps (temporal context: CNN sees last K frames as channels)
+    grid_history_len = 3  # number of stacked costmaps (temporal context: CNN sees last K frames as channels)
     # Push a new frame into history every N env steps so that K frames span ~1 s (at 60 env Hz: 4*15=60 steps)
     grid_history_interval_steps = 4
     grid_normalize = True  # normalize costs for RL input
@@ -99,34 +99,25 @@ class PirlEnvCfg(DirectRLEnvCfg):
     sceneblox_usd_paths: tuple[str, ...] = (
         "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/warehouse_with_forklifts.usd",
     )
-    # Runtime dynamic obstacles (stable replacement for people in RL training).
-    # Runtime moving XForm obstacles are expensive for ray-caster tracking in headless mode.
+    # Runtime dynamic obstacles.
+    #
+    # Implementation: kinematic primitive cylinders driven by a single
+    # `RigidObjectCollection` shared across envs. One CylinderCfg is instanced
+    # per slot (regex prim_path), poses are written in one batched GPU call per
+    # reset/step. LiDAR only reads ranges, so primitive shape is sufficient
+    # for obstacle-avoidance learning and avoids the per-prim USD overhead of
+    # ArchVis assets (~linear with num_envs × slot_count).
     dyn_obstacle_enabled = True
-    # Variety of non-trivial props (chairs/storage/table) for lidar obstacle perception.
-    # ArchVis assets are in centimeters; DynamicObstaclesManager scales them to meters.
-    # How to discover valid USD URLs later:
-    #   curl -s "https://omniverse-content-production.s3-us-west-2.amazonaws.com/?prefix=Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/&max-keys=1000"
-    # Then pick <Key>...*.usd</Key> entries and prepend:
-    #   https://omniverse-content-production.s3-us-west-2.amazonaws.com/
-    dyn_obstacle_usd_paths: tuple[str, ...] = (
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Seating/Jobba/Jobba_Chair.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Seating/Petite_Chair.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Seating/Stackable.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Seating/Caprice/Caprice_A.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Storage/Contemporary/Contemporary_StorageCube.usd",
-        #"https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Storage/Standard/Standard_SmallUnit.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Tables/OakTableSmall.usd",
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/Commercial/Tables/Kettle.usd",
-    )
-    dyn_obstacle_slot_count = 16
-    dyn_obstacle_count_range = (12, 24)
-    dyn_obstacle_xy_range = ((-8.0, 8.0), (-8.0, 8.0))
-    dyn_obstacle_keepout_radius = 1.0
-    dyn_obstacle_min_separation = 1.5
-    dyn_obstacle_max_sample_tries = 40
+    dyn_obstacle_slot_count = 20              # distinct cylinders per env (= collection objects)
+    dyn_obstacle_count_range = (16, 20)        # active cylinders per episode, clamped to slot_count
+    dyn_obstacle_radius = 0.25               # cylinder radius, m
+    dyn_obstacle_height = 1.0                # cylinder height, m
+    dyn_obstacle_xy_range = ((-6.0, 6.0), (-6.0, 6.0))
+    dyn_obstacle_keepout_radius = 1.0        # free disc around env origin (robot spawn zone)
+    dyn_obstacle_min_separation = 1.5        # pairwise cylinder separation, m
     dyn_obstacle_motion_radius_range = (0.4, 1.0)
     dyn_obstacle_motion_speed_range = (0.2, 0.8)  # angular speed, rad/s
-    dyn_obstacle_z_world = 0.03
+    dyn_obstacle_z_world = 0.5               # cylinder centre height, m (= height/2 above ground)
 
     # robot(s)
     robot_cfg: ArticulationCfg = JETTANK_CFG.replace(
@@ -182,21 +173,25 @@ class PirlEnvCfg(DirectRLEnvCfg):
     )
 
     # Multi-env scene; dynamic obstacles are created under each env namespace.
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=10, env_spacing=35.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=50, env_spacing=35.0, replicate_physics=True)
 
     # controllable joints (explicit left/right order)
     dof_names = ["left_wheel_joint", "right_wheel_joint"]
 
     # cmd_vel limits and robot geometry (for wheel speed conversion)
     max_lin_vel = 0.5  # m/s
-    max_ang_vel = 3.0  # rad/s
+    max_ang_vel = 1.5  # rad/s
     wheel_radius = 0.03  # m (60mm diameter)
     track_width = 0.242  # m
     
-    # Core reward: r = w1*(s_t - s_{t-1}) - w2*d_path + w3*cos(delta_heading)
+    # Core reward: r = w1*(s_t - s_{t-1}) - w2*d_path^2 + w3*cos(delta_heading)
     rew_scale_progress = 10.0
-    # Cross-track distance penalty coefficient (w2).
-    rew_scale_path_error = 0.005 
+    # Cross-track distance penalty coefficient (w2). Applied QUADRATICALLY in _get_rewards()
+    # so that small offsets cost almost nothing while large offsets overwhelm the
+    # +progress/+heading terms, killing the "drive parallel at fixed offset" exploit.
+    # Reference scale: at d=0.5 m penalty is -0.5^2 * 0.3 = -0.075/step (> progress 0.06);
+    # at d=0.1 m it is -0.003/step (negligible, doesn't punish normal tracking noise).
+    rew_scale_path_error = 0.3
     # Extra safety shaping terms (proximity/collision/reverse) are enabled.
     rew_scale_collision = -15.0
     collision_robot_radius = 0.20  # slightly larger to keep collision signal aligned with proximity
@@ -205,8 +200,9 @@ class PirlEnvCfg(DirectRLEnvCfg):
     proximity_front_fov_deg = 360.0
     rew_proximity_max_penalty = -0.05
     rew_scale_reverse = 0.0
-    # Heading alignment coefficient (w3): reward adds w3 * cos(delta_heading).
-    rew_scale_heading = 0.01
+    # Heading alignment coefficient (w3): reward adds w3 * cos(delta_heading) * forward_gate.
+    # Gated by forward speed in _get_rewards(), so no bonus for "face path + reverse".
+    rew_scale_heading = 0.05
     robot_spawn_radius = 0.5
     spawn_angle_range: tuple[float, float] | None = (math.pi * 0.5, math.pi * 1.5)
     path_angle_range: tuple[float, float] | None = (-math.pi * 0.5, math.pi * 0.5)

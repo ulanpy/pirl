@@ -3,13 +3,15 @@
 `pirl` is an Isaac Lab/Isaac Sim reinforcement-learning project for local obstacle avoidance with
 a tracked differential-drive robot in dynamic warehouse-like scenes. The repo provides a custom
 direct RL environment (`pirl.tasks`) with LiDAR-driven local costmaps, path-following rewards, and
-SKRL PPO-RNN training scripts, plus optional auxiliary dynamics and HJB-style regularization.
+SKRL PPO-RNN training scripts, plus an optional HJB PINN-style critic regularizer.
 
 ## Repository Structure
 
 - `README.md` - setup and usage instructions for Isaac Lab template workflow.
 - `docs/` - project-specific design notes (path contract, POMDP/costmap notes, architecture graphs).
-- `scripts/` - runnable entrypoints for training, playback, env listing, and dummy agents.
+- `scripts/` - runnable entrypoints for training, playbackЭто, по моему мнению, более удачный кандидат для дипломной работы, и сейчас объясню почему — а также как корректно обойти ваш справедливый страх по поводу шума лидара.
+
+, env listing, and dummy agents.
 - `source/` - Python package source (`source/pirl`) and extension packaging files.
 - `logs/` - training artifacts (TensorBoard/event logs, dumped params).
 - `outputs/` - Hydra run outputs and resolved configs.
@@ -115,8 +117,8 @@ flowchart LR
   J --> K[actions: lin/yaw]
   K --> B
   B --> L[reward terms]
-  L --> M[PPODynamicsAuxRNN]
-  M --> N[policy/value/dynamics/HJB losses]
+  L --> M[PPOHjbRNN]
+  M --> N[policy/value/HJB losses]
 ```
 
 Data flow summary:
@@ -128,7 +130,7 @@ Data flow summary:
 3. Actor outputs normalized actions; env maps them to differential-drive wheel velocity targets.
 4. Rewards combine path progress, path error, heading alignment, proximity/collision, and optional
    reverse shaping.
-5. Agent update uses PPO losses plus optional auxiliary dynamics and optional HJB residual.
+5. Agent update uses PPO losses plus an optional HJB residual on the critic.
 
 ## Testing Strategy
 
@@ -168,7 +170,7 @@ Data flow summary:
 - Require human review for:
   - reward-definition changes,
   - action/kinematics mapping,
-  - HJB/dynamics loss math changes,
+  - HJB loss math changes,
   - config defaults that affect reproducibility.
 - Run at least one smoke command (zero/random agent or short train) after substantial logic edits.
 - Avoid launching multiple long Isaac Sim training jobs concurrently on the same machine.
@@ -181,11 +183,10 @@ Data flow summary:
   - `source/pirl/pirl/tasks/direct/pirl/agents/skrl_ppo_aux_cfg.yaml`
 - Custom model/loss extension points:
   - `source/pirl/pirl/tasks/direct/pirl/agents/recurrent_models.py`
-  - `source/pirl/pirl/tasks/direct/pirl/agents/ppo_dynamics_aux.py`
+  - `source/pirl/pirl/tasks/direct/pirl/agents/ppo_hjb_rnn.py`
 - Observation-layout mapping hook:
   - `source/pirl/pirl/tasks/direct/pirl/agents/obs_layout.py`
 - Feature flags via config:
-  - dynamics loss (`dynamics_loss_scale`)
   - HJB loss (`hjb_loss_scale`)
   - reward term scales in env config
 - Runtime/env vars:
@@ -197,6 +198,6 @@ Data flow summary:
 - `docs/pirl_path_contract_ros_like.md`
 - `docs/pirl_direct_pomdp_costmap.md`
 - `docs/ppo_aux_architecture_graph.md`
+- `docs/HJB_THEORY_TIME_DISTANCE.md`
 - `source/pirl/pirl/tasks/direct/pirl/pirl_env.py`
 - `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py`
-- `source/pirl/pirl/tasks/direct/pirl/agents/README_PPODynamicsAux.md`

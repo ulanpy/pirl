@@ -60,33 +60,33 @@ $$
 This is intentionally simple and stable for regularization.
 It matches the signed-error convention used by the environment.
 
-## 4) Hamiltonian residual
+## 4) Hamiltonian residual (reward-max convention)
 
-Classical local form:
+PPO learns a reward-maximization value $V_\pi(x)=\mathbb E\left[\sum_t \gamma^t r_t\right]$,
+so the HJB residual is written in the matching reward-max continuous form with
+$r=-\ell$ and discount rate $\rho=-\ln\gamma/\Delta t$:
 
 $$
-\mathcal{H}(x,u,\nabla V)
+\mathcal R_r(x,u,\nabla V)
 =
-\ell(x,u)
- + \nabla_x V(x)^\top f(x,u)
+r(x,u) + \nabla_x V(x)^\top f(x,u) - \rho\, V(x),
+\qquad r = -\ell.
 $$
 
-with:
+At Bellman stationarity $\mathcal R_r(x,u^*)=0$, so squared-residual regularization
+pulls $V$ toward a geometry consistent with the dynamics and the running-cost
+model — without flipping gradients against PPO's TD targets.
+
+Dynamics:
 
 $$
 f(x,u)=
-\begin{bmatrix}
-\dot d \\
-\dot\psi
-\end{bmatrix}
+\begin{bmatrix}\dot d\\\dot\psi\end{bmatrix}
 =
-\begin{bmatrix}
-v\sin\psi \\
-\omega
-\end{bmatrix}
+\begin{bmatrix}v\sin\psi\\\omega\end{bmatrix}
 $$
 
-Running cost (aligned with env reward priorities):
+Running cost (shape of the reward prior, used via $r=-\ell$):
 
 $$
 \ell
@@ -100,31 +100,29 @@ $$
 
 Interpretation:
 
-- $w_d d^2$: penalize lateral deviation,
+- $w_d d^2$: penalize lateral deviation (matches env `cte_val = -d^2 * rew_scale_path_error`),
 - $w_\psi(1-\cos\psi)$: penalize heading misalignment smoothly,
-- control term: regularize aggressive commands,
-- $-w_p v\cos\psi$: encourage forward progress toward heading target.
+- $w_u(v^2+0.1\omega^2)$: regularize aggressive commands,
+- $-w_p v\cos\psi$: reward forward progress toward the heading target.
 
-For this quadratic-in-control Hamiltonian, the unconstrained minimizer is:
+For the reward-max Hamiltonian $\mathcal H_r(u)=-\ell+\nabla V^\top f$ (quadratic in $u$),
+$\partial\mathcal H_r/\partial u=0$ gives the analytic maximizer:
 
 $$
-v^* = \frac{w_p\cos\psi - \frac{\partial V}{\partial d}\sin\psi}{2w_u},
+v^* = \frac{w_p\cos\psi + \frac{\partial V}{\partial d}\sin\psi}{2w_u},
 \qquad
-\omega^* = -\frac{1}{0.2w_u}\frac{\partial V}{\partial \psi}
+\omega^* = \frac{1}{0.2\, w_u}\frac{\partial V}{\partial \psi}
 $$
 
-Then we evaluate (optimal mode):
+Note the **positive** signs on $\partial V/\partial d$ and $\partial V/\partial\psi$:
+these flipped when we switched from the cost-min to the reward-max convention.
 
-$$
-\mathcal H^*(x,\nabla V) := \mathcal H(x,u^*(x,\nabla V),\nabla V)
-$$
-
-Residual loss:
+Residual loss (optimal mode):
 
 $$
 \mathcal{L}_{hjb}
 =
-\lambda_{hjb}\,\mathbb{E}\left[\mathcal{H}_{mode}^2\right]
+\lambda_{hjb}\,\mathbb{E}\!\left[\mathcal R_r(x,u^*,\nabla V)^2\right]
 $$
 
 ## 5) Input indices in current `vec`
@@ -162,8 +160,13 @@ Main HJB config in `skrl_ppo_aux_cfg.yaml`:
 - `hjb_heading_weight` $\rightarrow w_\psi$
 - `hjb_control_weight` $\rightarrow w_u$
 - `hjb_progress_weight` $\rightarrow w_p$
-- `hjb_hamiltonian_mode` $\rightarrow$ choice of \(u\) in Hamiltonian (`policy` or `optimal`)
+- `hjb_hamiltonian_mode` $\rightarrow$ choice of $u$ in Hamiltonian (`policy` or `optimal`)
+- `hjb_step_dt` $\rightarrow \Delta t$ used to derive $\rho=-\ln\gamma/\Delta t$
 - `hjb_max_lin_vel`, `hjb_max_ang_vel` are kept in config for backward compatibility.
+
+The value used in the $\rho V$ term is the physical (unnormalized) critic output,
+obtained by inverse-applying the `RunningStandardScaler` value preprocessor so
+$\rho V$ has the same units as the reward-rate running cost $\ell$.
 
 ## 8) Practical expectations
 

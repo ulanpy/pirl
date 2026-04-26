@@ -194,7 +194,13 @@ class RecurrentGaussianPolicy(GaussianMixin, Model):
             aux_dim=int(aux_dim),
         )
         action_dim = int(self.num_actions) if self.num_actions is not None else int(math.prod(action_space.shape))
-        self.mean_head = nn.Linear(int(gru_hidden_size), action_dim)
+        self.mean_head = nn.Sequential(
+            nn.Linear(int(gru_hidden_size), 128),
+            nn.ELU(),
+            nn.Linear(128, 64),
+            nn.ELU(),
+            nn.Linear(64, action_dim),
+        )
         self.log_std_parameter = nn.Parameter(torch.full((action_dim,), float(initial_log_std)))
 
     def get_specification(self) -> Mapping[str, Any]:
@@ -325,7 +331,11 @@ class FeedForwardDeterministicValue(DeterministicMixin, Model):
             nn.Linear(256, 128),
             nn.ELU(),
         )
-        self.value_head = nn.Linear(128, 1)
+        self.value_head = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ELU(),
+            nn.Linear(64, 1),
+        )
 
     def compute(self, inputs, role=""):
         states = inputs["states"]

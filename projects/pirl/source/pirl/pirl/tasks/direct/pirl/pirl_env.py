@@ -11,7 +11,7 @@ import isaaclab.utils.math as math_utils
 
 from .pirl_env_cfg import PirlEnvCfg
 from .pirl_env_costmap import LocalCostmapBuilder
-from .pirl_env_dyn_obstacles import DynamicObstaclesManager
+from .pirl_env_dyn_obstacles import DynamicObstacles
 from .pirl_env_path import LocalPathManager
 from .pirl_env_proximity import ProximityReward
 from .pirl_env_visuals import define_markers, define_path_markers, visualize_markers
@@ -75,16 +75,22 @@ class PirlEnv(DirectRLEnv):
         # copy_from_source=True: each env gets full copy of the base scene.
         self.scene.clone_environments(copy_from_source=True)
         self.scene.articulations["robot"] = self.robot
-        self.dyn_obstacles = DynamicObstaclesManager(self.cfg, self.device, self.num_envs)
-        self.dyn_obstacles.setup()
-        # Additional lidar targets for runtime dynamic obstacles only.
+        # Dynamic obstacles: a single RigidObjectCollection with one CylinderCfg per
+        # slot is instantiated AFTER clone_environments so that /World/envs/env_.*
+        # parents already exist for the regex spawner. The collection is then
+        # registered into the InteractiveScene so lifecycle (update/write_data/reset)
+        # is managed automatically.
         if self.cfg.dyn_obstacle_enabled:
+            self.dyn_obstacles = DynamicObstacles(self.cfg, self.device, self.num_envs)
+            self.dyn_obstacles.attach(self.scene)
             self.cfg.lidar.mesh_prim_paths.append(
                 MultiMeshRayCasterCfg.RaycastTargetCfg(
-                    prim_expr="/World/envs/env_.*/GeneratedScene/DynamicObstacles/DynObstacle_.*",
+                    prim_expr="/World/envs/env_.*/DynObstacle_.*",
                     track_mesh_transforms=True,
                 )
             )
+        else:
+            self.dyn_obstacles = None
 
         # Initialize sensors
         self.lidar = MultiMeshRayCaster(self.cfg.lidar)
@@ -105,8 +111,9 @@ class PirlEnv(DirectRLEnv):
         self.prev_actions.copy_(self.actions)
         # PPO actions are sampled from an unbounded Gaussian; clamp to keep in [-1, 1]
         self.actions = torch.clamp(actions, -1.0, 1.0).clone()
-        # Update moving obstacle poses each env step.
-        self.dyn_obstacles.step(self.cfg.sim.dt * self.cfg.decimation, self.scene.env_origins)
+        # Batched kinematic pose write for moving obstacles (no-op if disabled).
+        if self.dyn_obstacles is not None:
+            self.dyn_obstacles.step(self.cfg.sim.dt * self.cfg.decimation, self.scene.env_origins)
         visualize_markers(
             self.visualization_markers,
             self.path_markers,
@@ -247,9 +254,16 @@ class PirlEnv(DirectRLEnv):
             # r_core = w1*(s_t - s_{t-1}) - w2*d_path + w3*cos(delta_heading)
             delta_s = self.curr_path_s - self.prev_path_s
             progress_val = delta_s * float(self.cfg.rew_scale_progress)
-            cte_val = -self.curr_path_error * float(self.cfg.rew_scale_path_error)
+            # Quadratic cross-track penalty: shape matches HJB running-cost term w_d * d^2,
+            # and removes the "drive parallel at fixed offset" exploit where a linear
+            # penalty is dominated by +progress + heading bonuses for small, sustained d.
+            cte_val = -(self.curr_path_error ** 2) * float(self.cfg.rew_scale_path_error)
             forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
-            heading_val = self.path_heading_cos * float(self.cfg.rew_scale_heading)
+            # Gate heading reward by forward motion: alignment is only credited when the
+            # robot is actually progressing. Prevents the "face path + reverse" exploit
+            # where a stationary or backward-drifting agent harvests a constant heading bonus.
+            forward_gate = torch.clamp(forward_speed / float(self.cfg.max_lin_vel), min=0.0, max=1.0)
+            heading_val = self.path_heading_cos * float(self.cfg.rew_scale_heading) * forward_gate
             # Safety shaping (kept to preserve obstacle avoidance behavior).
             proximity_val = self.proximity.compute_penalty(self._latest_lidar_ranges_m)
             if self._latest_lidar_ranges_m is None:
@@ -369,8 +383,9 @@ class PirlEnv(DirectRLEnv):
         # PhysX backend expects tensor-like indices here.
         self.robot.write_root_state_to_sim(root_state, env_ids_t)  # type: ignore[arg-type]
 
-        # Runtime dynamic obstacles.
-        self.dyn_obstacles.reset(env_ids_t, self.scene.env_origins)
+        # Runtime dynamic obstacles: batched GPU placement + pose write.
+        if self.dyn_obstacles is not None:
+            self.dyn_obstacles.reset(env_ids_t, self.scene.env_origins)
         
         # Reset sensors
         self.lidar.reset(env_ids_seq)

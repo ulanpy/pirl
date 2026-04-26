@@ -12,17 +12,15 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                 lname = name.lower()
 
                 # Explicit custom component registry (hardcoded on purpose).
-                from .ppo_dynamics_aux import PPODynamicsAuxRNN, PPODynamicsAux_default_config
+                from .ppo_hjb_rnn import PPOHjbRNN, PPOHjbRNN_default_config
                 from .recurrent_models import (
                     FeedForwardDeterministicValue,
                     RecurrentDeterministicValue,
                     RecurrentGaussianPolicy,
                 )
                 custom_components = {
-                    "ppodynamicsaux": PPODynamicsAuxRNN,
-                    "ppodynamicsauxrnn": PPODynamicsAuxRNN,
-                    "ppodynamicsaux_default_config": PPODynamicsAux_default_config,
-                    "ppodynamicsauxrnn_default_config": PPODynamicsAux_default_config,
+                    "ppohjbrnn": PPOHjbRNN,
+                    "ppohjbrnn_default_config": PPOHjbRNN_default_config,
                     "recurrentgaussianpolicy": RecurrentGaussianPolicy,
                     "recurrentdeterministicvalue": RecurrentDeterministicValue,
                     "feedforwarddeterministicvalue": FeedForwardDeterministicValue,

@@ -1,232 +1,271 @@
+"""GPU-batched kinematic obstacles backed by Isaac Lab's RigidObjectCollection.
+
+Design goals:
+  * One CylinderCfg per slot, shared across all envs via regex prim paths.
+    Geometry is instanced, not replicated per-env, so start-up cost is O(slot_count),
+    not O(num_envs * slot_count).
+  * Placement sampling, motion integration and pose writes are fully vectorized
+    on the device. No Python-per-env loops in hot paths.
+  * Integrates with ``isaaclab.scene.InteractiveScene`` lifecycle: the collection
+    is registered into ``scene._rigid_object_collections`` so that
+    ``scene.write_data_to_sim`` / ``scene.update`` / ``scene.reset`` call it
+    automatically.
+
+The public surface mirrors the previous manager for call-site compatibility:
+  ``build_collection_cfg(cfg)`` -> ``RigidObjectCollectionCfg``
+  ``DynamicObstacles(cfg, device, num_envs).attach(scene)``
+  ``obstacles.reset(env_ids, env_origins)`` -- randomize active placements.
+  ``obstacles.step(dt, env_origins)``       -- advance circular motion.
+"""
+
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
 
-import isaaclab.sim as sim_utils
 import torch
-from isaacsim.core.prims import SingleXFormPrim
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import RigidObjectCfg, RigidObjectCollection, RigidObjectCollectionCfg
+from isaaclab.scene import InteractiveScene
+
+# Sentinel Z used to park inactive cylinders far below the floor without
+# affecting the LiDAR (which has a finite max_distance and ray alignment to
+# the robot base). Keeping them "somewhere" rather than destroying them lets
+# the PhysX rigid-body view keep a fixed, static index layout.
+_HIDDEN_Z_WORLD = -50.0
 
 
-def _scale_from_asset_path(asset_path: str) -> tuple[float, float, float]:
-    # ArchVis assets are in centimeters. Convert to meters.
-    if "/NVIDIA/Assets/ArchVis/" in asset_path:
-        return (0.01, 0.01, 0.01)
-    return (1.0, 1.0, 1.0)
+def build_collection_cfg(cfg) -> RigidObjectCollectionCfg:
+    """Construct a ``RigidObjectCollectionCfg`` with ``slot_count`` kinematic cylinders.
 
-
-def _has_supported_mesh_descendant(root_prim) -> bool:
-    """Return True if prim subtree contains geometry trackable by MultiMeshRayCaster."""
-    supported = {"Plane", "Cube", "Sphere", "Cylinder", "Capsule", "Cone", "Mesh"}
-    stack = [root_prim]
-    while stack:
-        prim = stack.pop()
-        if prim.GetTypeName() in supported:
-            return True
-        for child in prim.GetChildren():
-            stack.append(child)
-    return False
-
-
-def _asset_url_discovery_doc() -> str:
-    """How to find new valid obstacle assets.
-
-    1) List a remote prefix:
-       curl -s "https://omniverse-content-production.s3-us-west-2.amazonaws.com/?prefix=Assets/Isaac/5.1/NVIDIA/Assets/ArchVis/&max-keys=1000"
-    2) Pick `<Key>...*.usd</Key>` entries from the XML.
-    3) Prepend:
-       https://omniverse-content-production.s3-us-west-2.amazonaws.com/
+    One distinct object key ``obstacle_{i}`` maps to one CylinderCfg shared across
+    all envs via ``/World/envs/env_.*/DynObstacle_{i}``. Data shape from the
+    resulting collection is ``(num_envs, slot_count)``.
     """
-    return ""
+    slot_count = int(cfg.dyn_obstacle_slot_count)
+    radius = float(cfg.dyn_obstacle_radius)
+    height = float(cfg.dyn_obstacle_height)
+
+    cylinder_spawn = sim_utils.CylinderCfg(
+        radius=radius,
+        height=height,
+        axis="Z",
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            kinematic_enabled=True,
+            disable_gravity=True,
+            # Kinematic bodies don't need iteration tuning, but set conservative defaults.
+            solver_position_iteration_count=2,
+            solver_velocity_iteration_count=0,
+        ),
+        mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
+        collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.85, 0.3, 0.2)),
+    )
+
+    rigid_objects: dict[str, RigidObjectCfg] = {}
+    for i in range(slot_count):
+        rigid_objects[f"obstacle_{i}"] = RigidObjectCfg(
+            prim_path=f"/World/envs/env_.*/DynObstacle_{i}",
+            spawn=cylinder_spawn,
+            init_state=RigidObjectCfg.InitialStateCfg(
+                pos=(0.0, 0.0, _HIDDEN_Z_WORLD),
+                rot=(1.0, 0.0, 0.0, 0.0),
+            ),
+        )
+    return RigidObjectCollectionCfg(rigid_objects=rigid_objects)
 
 
-class DynamicObstaclesManager:
-    """Runtime moving obstacles with deterministic per-env motion."""
+class DynamicObstacles:
+    """Kinematic circular-motion obstacles driven by batched pose writes."""
 
     def __init__(self, cfg, device: torch.device | str, num_envs: int) -> None:
         self.cfg = cfg
         self.device = device
-        self.num_envs = num_envs
-        self.slot_count = max(0, int(getattr(cfg, "dyn_obstacle_slot_count", 0)))
-        self._obstacle_prims: list[list[SingleXFormPrim]] = []
-        self._active = torch.zeros((num_envs, self.slot_count), dtype=torch.bool, device=device)
-        self._anchor_xy = torch.zeros((num_envs, self.slot_count, 2), dtype=torch.float32, device=device)
-        self._radius = torch.zeros((num_envs, self.slot_count), dtype=torch.float32, device=device)
-        self._phase = torch.zeros((num_envs, self.slot_count), dtype=torch.float32, device=device)
-        self._omega = torch.zeros((num_envs, self.slot_count), dtype=torch.float32, device=device)
+        self.num_envs = int(num_envs)
+        self.slot_count = int(cfg.dyn_obstacle_slot_count)
 
-    def setup(self) -> None:
-        self._obstacle_prims = []
-        if not bool(getattr(self.cfg, "dyn_obstacle_enabled", True)):
-            return
-        if self.slot_count <= 0:
-            return
-        asset_paths = tuple(getattr(self.cfg, "dyn_obstacle_usd_paths", ()))
-        if len(asset_paths) == 0:
-            return
+        shape = (self.num_envs, self.slot_count)
+        self._active = torch.zeros(shape, dtype=torch.bool, device=device)
+        self._anchor_xy = torch.zeros((*shape, 2), dtype=torch.float32, device=device)
+        self._radius = torch.zeros(shape, dtype=torch.float32, device=device)
+        self._phase = torch.zeros(shape, dtype=torch.float32, device=device)
+        self._omega = torch.zeros(shape, dtype=torch.float32, device=device)
 
-        identity_quat = (1.0, 0.0, 0.0, 0.0)
-        hidden_pos = (0.0, 0.0, -15.0)
+        self._z_world = float(cfg.dyn_obstacle_z_world)
+        self._collection: RigidObjectCollection | None = None
 
-        for env_id in range(self.num_envs):
-            ns_path = f"/World/envs/env_{env_id}/GeneratedScene/DynamicObstacles"
-            try:
-                sim_utils.create_prim(ns_path, prim_type="Xform")
-            except ValueError:
-                pass
+        # Cached helper tensors.
+        self._all_env_idx = torch.arange(self.num_envs, device=device, dtype=torch.long)
+        self._all_obj_idx = torch.arange(self.slot_count, device=device, dtype=torch.long)
 
-        for slot_idx in range(self.slot_count):
-            asset_path = asset_paths[slot_idx % len(asset_paths)]
-            scale = _scale_from_asset_path(asset_path)
-            slot_prims: list[SingleXFormPrim] = []
-            created_paths: list[str] = []
-            slot_ok = True
-            for env_id in range(self.num_envs):
-                prim_path = f"/World/envs/env_{env_id}/GeneratedScene/DynamicObstacles/DynObstacle_{slot_idx}"
-                try:
-                    sim_utils.create_prim(
-                        prim_path=prim_path,
-                        prim_type="Xform",
-                        translation=hidden_pos,
-                        orientation=identity_quat,
-                        usd_path=asset_path,
-                    )
-                    created_paths.append(prim_path)
-                    # Lidar/XformPrimView require canonical xform ops [translate, orient, scale].
-                    # Use same stage as create_prim (Isaac Lab may use _context.stage, not omni context).
-                    stage = sim_utils.get_current_stage()
-                    usd_prim = stage.GetPrimAtPath(prim_path)
-                    if not usd_prim.IsValid():
-                        raise ValueError(f"Spawned prim is invalid: {prim_path}")
-                    if not sim_utils.standardize_xform_ops(
-                        usd_prim,
-                        translation=hidden_pos,
-                        orientation=identity_quat,
-                        scale=scale,
-                    ):
-                        raise ValueError(f"Failed to standardize xform ops: {prim_path}")
-                    # Invalid/missing USD payload leaves only Xform without mesh; skip such assets.
-                    if not _has_supported_mesh_descendant(usd_prim):
-                        raise ValueError(f"Asset has no supported mesh descendants: {asset_path}")
-                    prim = SingleXFormPrim(prim_path, reset_xform_properties=False)
-                    prim.set_local_scale(scale)
-                    prim.set_visibility(False)
-                    slot_prims.append(prim)
-                except Exception:
-                    slot_ok = False
-                    break
-            if not slot_ok:
-                for path in created_paths:
-                    try:
-                        sim_utils.delete_prim(path)
-                    except Exception:
-                        pass
-                continue
-            self._obstacle_prims.append(slot_prims)
+    # ------------------------------------------------------------------ setup
+
+    def attach(self, scene: InteractiveScene, collection_key: str = "dyn_obstacles") -> None:
+        """Instantiate the RigidObjectCollection and register it into the scene.
+
+        Must be called after ``scene.clone_environments(...)`` so that the
+        ``/World/envs/env_.*`` parents already exist for the regex spawner.
+        """
+        coll_cfg = build_collection_cfg(self.cfg)
+        collection = RigidObjectCollection(coll_cfg)
+        scene._rigid_object_collections[collection_key] = collection  # noqa: SLF001
+        self._collection = collection
+
+    # ------------------------------------------------------------------ reset
 
     def reset(self, env_ids: Sequence[int] | torch.Tensor, env_origins: torch.Tensor) -> None:
-        if len(self._obstacle_prims) == 0:
-            return
-        if len(env_ids) == 0:
-            return
-        env_ids_list = env_ids.tolist() if isinstance(env_ids, torch.Tensor) else list(env_ids)
+        """Sample fresh placements for ``env_ids`` and teleport their cylinders.
 
-        x_range, y_range = getattr(self.cfg, "dyn_obstacle_xy_range", ((-6.0, 6.0), (-6.0, 6.0)))
-        keepout = float(getattr(self.cfg, "dyn_obstacle_keepout_radius", 1.5))
-        min_sep = float(getattr(self.cfg, "dyn_obstacle_min_separation", 1.2))
-        max_tries = int(getattr(self.cfg, "dyn_obstacle_max_sample_tries", 40))
-        min_count, max_count = getattr(self.cfg, "dyn_obstacle_count_range", (2, 4))
-        max_count = min(int(max_count), len(self._obstacle_prims))
-        min_count = min(int(min_count), max_count)
-        r_min, r_max = getattr(self.cfg, "dyn_obstacle_motion_radius_range", (0.4, 1.0))
-        w_min, w_max = getattr(self.cfg, "dyn_obstacle_motion_speed_range", (0.2, 0.7))
-        z_world = float(getattr(self.cfg, "dyn_obstacle_z_world", 0.0))
+        Sampling is rejection-free: we draw XY uniformly in the configured arena,
+        enforce a keep-out disc around the robot origin and a pairwise
+        min-separation via a sequential GPU mask. The result is a boolean
+        ``active`` mask, anchor centres, orbit radii and angular speeds per
+        (env, slot).
+        """
+        if self._collection is None:
+            raise RuntimeError("DynamicObstacles.attach(scene) must be called before reset.")
+        if isinstance(env_ids, torch.Tensor):
+            env_ids_t = env_ids.to(device=self.device, dtype=torch.long)
+        else:
+            env_ids_t = torch.as_tensor(list(env_ids), device=self.device, dtype=torch.long)
+        n = int(env_ids_t.shape[0])
+        if n == 0:
+            return
+        S = self.slot_count
+
+        x_range = self.cfg.dyn_obstacle_xy_range[0]
+        y_range = self.cfg.dyn_obstacle_xy_range[1]
+        keepout = float(self.cfg.dyn_obstacle_keepout_radius)
+        min_sep = float(self.cfg.dyn_obstacle_min_separation)
+        min_cnt, max_cnt = self.cfg.dyn_obstacle_count_range
+        max_cnt = min(int(max_cnt), S)
+        min_cnt = min(int(min_cnt), max_cnt)
+        r_min, r_max = self.cfg.dyn_obstacle_motion_radius_range
+        w_min, w_max = self.cfg.dyn_obstacle_motion_speed_range
         margin = float(r_max)
-        sx0, sx1 = float(x_range[0]) + margin, float(x_range[1]) - margin
-        sy0, sy1 = float(y_range[0]) + margin, float(y_range[1]) - margin
+
+        sx0 = float(x_range[0]) + margin
+        sx1 = float(x_range[1]) - margin
+        sy0 = float(y_range[0]) + margin
+        sy1 = float(y_range[1]) - margin
         if sx1 <= sx0:
-            sx0, sx1 = x_range
+            sx0, sx1 = float(x_range[0]), float(x_range[1])
         if sy1 <= sy0:
-            sy0, sy1 = y_range
+            sy0, sy1 = float(y_range[0]), float(y_range[1])
 
-        identity_quat = (1.0, 0.0, 0.0, 0.0)
-        for env_id in env_ids_list:
-            env_id = int(env_id)
-            origin = env_origins[env_id]
-            hidden_pos = (float(origin[0]), float(origin[1]), -15.0)
-            self._active[env_id, :] = False
-            for slot_idx in range(len(self._obstacle_prims)):
-                prim = self._obstacle_prims[slot_idx][env_id]
-                prim.set_world_pose(position=hidden_pos, orientation=identity_quat)
-                prim.set_visibility(False)
+        # --- 1. Sample candidate XY per (env, slot). ---
+        cand = torch.empty((n, S, 2), device=self.device, dtype=torch.float32)
+        cand[..., 0].uniform_(sx0, sx1)
+        cand[..., 1].uniform_(sy0, sy1)
 
-            active_count = int(torch.randint(min_count, max_count + 1, (1,), device=self.device).item())
-            perm = torch.randperm(len(self._obstacle_prims), device=self.device).tolist()
-            placed_xy: list[tuple[float, float]] = []
-            activated = 0
-            for slot_idx in perm:
-                if activated >= active_count:
-                    break
-                sample_ok = False
-                cand_x, cand_y = 0.0, 0.0
-                for _ in range(max_tries):
-                    cand_x = float(torch.empty(1, device=self.device).uniform_(sx0, sx1).item())
-                    cand_y = float(torch.empty(1, device=self.device).uniform_(sy0, sy1).item())
-                    if (cand_x * cand_x + cand_y * cand_y) < (keepout * keepout):
-                        continue
-                    too_close = any((cand_x - px) ** 2 + (cand_y - py) ** 2 < (min_sep * min_sep) for px, py in placed_xy)
-                    if not too_close:
-                        sample_ok = True
-                        break
-                if not sample_ok:
-                    continue
+        # --- 2. Keep-out disc around env origin (local frame). ---
+        dist2_origin = (cand * cand).sum(dim=-1)
+        origin_ok = dist2_origin >= (keepout * keepout)
 
-                r = float(torch.empty(1, device=self.device).uniform_(r_min, r_max).item())
-                phase = float(torch.empty(1, device=self.device).uniform_(0.0, 2.0 * math.pi).item())
-                omega = float(torch.empty(1, device=self.device).uniform_(w_min, w_max).item())
-                if torch.rand(1, device=self.device).item() < 0.5:
-                    omega = -omega
+        # --- 3. Sequential pairwise min-separation mask on GPU.
+        # Go through slots in order; each slot is valid if it's separated from all
+        # previously-accepted slots in the same env by >= min_sep.
+        valid = torch.zeros((n, S), dtype=torch.bool, device=self.device)
+        sep2 = min_sep * min_sep
+        for s in range(S):
+            if s == 0:
+                valid[:, 0] = origin_ok[:, 0]
+                continue
+            prev_xy = cand[:, :s, :]                    # (n, s, 2)
+            cur_xy = cand[:, s, :].unsqueeze(1)         # (n, 1, 2)
+            prev_valid = valid[:, :s]                   # (n, s)
+            d2 = ((prev_xy - cur_xy) ** 2).sum(dim=-1)  # (n, s)
+            # If a previous slot is not valid, ignore its contribution.
+            d2 = torch.where(prev_valid, d2, torch.full_like(d2, sep2 + 1.0))
+            sep_ok = (d2 >= sep2).all(dim=-1)
+            valid[:, s] = origin_ok[:, s] & sep_ok
 
-                self._anchor_xy[env_id, slot_idx, 0] = cand_x
-                self._anchor_xy[env_id, slot_idx, 1] = cand_y
-                self._radius[env_id, slot_idx] = r
-                self._phase[env_id, slot_idx] = phase
-                self._omega[env_id, slot_idx] = omega
-                self._active[env_id, slot_idx] = True
+        # --- 4. Randomize active count per env and keep first K valid slots. ---
+        active_counts = torch.randint(
+            low=min_cnt, high=max_cnt + 1, size=(n,), device=self.device, dtype=torch.long
+        )
+        # Permute slot order per env so the "first K valid" selection is random.
+        rand_key = torch.rand((n, S), device=self.device)
+        perm = rand_key.argsort(dim=-1)                 # (n, S)
+        perm_valid = valid.gather(dim=1, index=perm)
+        # Prefix-count of valid slots along the permuted order.
+        valid_prefix = perm_valid.to(torch.int64).cumsum(dim=-1)
+        keep_in_perm = perm_valid & (valid_prefix <= active_counts.unsqueeze(-1))
+        # Scatter back to original slot order.
+        final_active_local = torch.zeros_like(perm_valid)
+        final_active_local.scatter_(dim=1, index=perm, src=keep_in_perm)
 
-                px = float(origin[0]) + cand_x + r * math.cos(phase)
-                py = float(origin[1]) + cand_y + r * math.sin(phase)
-                yaw = phase + math.pi * 0.5
-                half = 0.5 * yaw
-                quat_wxyz = (math.cos(half), 0.0, 0.0, math.sin(half))
-                prim = self._obstacle_prims[slot_idx][env_id]
-                prim.set_world_pose(position=(px, py, z_world), orientation=quat_wxyz)
-                prim.set_visibility(True)
-                placed_xy.append((cand_x, cand_y))
-                activated += 1
+        # --- 5. Sample orbit radii, phases, angular speeds. ---
+        radii = torch.empty((n, S), device=self.device, dtype=torch.float32).uniform_(float(r_min), float(r_max))
+        phases = torch.empty((n, S), device=self.device, dtype=torch.float32).uniform_(0.0, 2.0 * math.pi)
+        omegas = torch.empty((n, S), device=self.device, dtype=torch.float32).uniform_(float(w_min), float(w_max))
+        sign = torch.where(torch.rand((n, S), device=self.device) < 0.5, -1.0, 1.0)
+        omegas = omegas * sign
+
+        # --- 6. Commit per-env state into persistent buffers. ---
+        self._active[env_ids_t] = final_active_local
+        self._anchor_xy[env_ids_t] = cand
+        self._radius[env_ids_t] = radii
+        self._phase[env_ids_t] = phases
+        self._omega[env_ids_t] = omegas
+
+        # --- 7. Compute initial world poses for ALL slots of the affected envs.
+        # Active slots placed at anchor+orbit, inactive slots parked at hidden_z.
+        local_xy = cand + torch.stack(
+            (radii * torch.cos(phases), radii * torch.sin(phases)), dim=-1
+        )
+        origins = env_origins[env_ids_t, :2]            # (n, 2)
+        world_xy = origins.unsqueeze(1) + local_xy       # (n, S, 2)
+
+        z_active = torch.full((n, S), self._z_world, device=self.device)
+        z_hidden = torch.full((n, S), _HIDDEN_Z_WORLD, device=self.device)
+        z = torch.where(final_active_local, z_active, z_hidden)
+
+        # Yaw = phase + pi/2 (tangent of circle); quaternion wxyz = [cos(yaw/2), 0, 0, sin(yaw/2)].
+        yaw = phases + 0.5 * math.pi
+        half = 0.5 * yaw
+        qw = torch.cos(half)
+        qz = torch.sin(half)
+        zeros = torch.zeros_like(qw)
+
+        pose = torch.empty((n, S, 7), device=self.device, dtype=torch.float32)
+        pose[..., 0] = world_xy[..., 0]
+        pose[..., 1] = world_xy[..., 1]
+        pose[..., 2] = z
+        pose[..., 3] = qw
+        pose[..., 4] = zeros
+        pose[..., 5] = zeros
+        pose[..., 6] = qz
+
+        self._collection.write_object_pose_to_sim(pose, env_ids=env_ids_t)
+
+    # ------------------------------------------------------------------- step
 
     def step(self, dt: float, env_origins: torch.Tensor) -> None:
-        if len(self._obstacle_prims) == 0:
+        """Advance circular motion and push batched poses into simulation."""
+        if self._collection is None or dt <= 0.0:
             return
-        if dt <= 0.0:
-            return
-        z_world = float(getattr(self.cfg, "dyn_obstacle_z_world", 0.0))
-        self._phase = self._phase + self._omega * float(dt)
+        # Phase integration (all envs, all slots, vectorized).
+        self._phase.add_(self._omega * float(dt))
 
-        for env_id in range(self.num_envs):
-            ox = float(env_origins[env_id, 0])
-            oy = float(env_origins[env_id, 1])
-            for slot_idx in range(min(len(self._obstacle_prims), self.slot_count)):
-                if not bool(self._active[env_id, slot_idx]):
-                    continue
-                phase = float(self._phase[env_id, slot_idx])
-                r = float(self._radius[env_id, slot_idx])
-                ax = float(self._anchor_xy[env_id, slot_idx, 0])
-                ay = float(self._anchor_xy[env_id, slot_idx, 1])
-                px = ox + ax + r * math.cos(phase)
-                py = oy + ay + r * math.sin(phase)
-                yaw = phase + math.pi * 0.5
-                half = 0.5 * yaw
-                quat_wxyz = (math.cos(half), 0.0, 0.0, math.sin(half))
-                prim = self._obstacle_prims[slot_idx][env_id]
-                prim.set_world_pose(position=(px, py, z_world), orientation=quat_wxyz)
+        local_x = self._anchor_xy[..., 0] + self._radius * torch.cos(self._phase)
+        local_y = self._anchor_xy[..., 1] + self._radius * torch.sin(self._phase)
+        origins = env_origins[:, :2]                     # (E, 2)
+        world_x = origins[:, 0:1] + local_x
+        world_y = origins[:, 1:2] + local_y
+
+        z = torch.where(
+            self._active,
+            torch.full_like(world_x, self._z_world),
+            torch.full_like(world_x, _HIDDEN_Z_WORLD),
+        )
+
+        yaw = self._phase + 0.5 * math.pi
+        half = 0.5 * yaw
+        qw = torch.cos(half)
+        qz = torch.sin(half)
+        zeros = torch.zeros_like(qw)
+
+        pose = torch.stack((world_x, world_y, z, qw, zeros, zeros, qz), dim=-1)
+        self._collection.write_object_pose_to_sim(pose)

@@ -1,4 +1,4 @@
-seed: 42
+seed: 669
 
 
 # Models are instantiated using skrl's model instantiator utility
@@ -31,16 +31,20 @@ memory:
 # PPO agent configuration (field names are from PPO_DEFAULT_CONFIG)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
 agent:
-  class: PPODynamicsAuxRNN
+  class: PPOHjbRNN
   rollouts: 256
   learning_epochs: 6
-  mini_batches: 4
+  mini_batches: 8
   discount_factor: 0.99
   lambda: 0.95
   learning_rate: 3.0e-04
-  learning_rate_scheduler: KLAdaptiveLR
+  # Disabled: KLAdaptiveLR kept crushing LR to ~0 around 30k steps on this task
+  # (policy std stays wide -> per-update KL routinely exceeds the threshold ->
+  # LR halves every step). Fixed LR + ratio_clip + grad_norm_clip is sufficient here.
+  # learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler: null
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.008
+    kl_threshold: 0.02
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
   value_preprocessor: RunningStandardScaler
@@ -51,24 +55,25 @@ agent:
   ratio_clip: 0.2
   value_clip: 0.2
   clip_predicted_values: True
-  entropy_loss_scale: 0.007
+  entropy_loss_scale: 0.1
   value_loss_scale: 2.0
   kl_threshold: 0.0
   rewards_shaper_scale: 1.0
-  dynamics_loss_scale: 0.02
-  dynamics_learning_rate: 5.0e-04
-  dynamics_hidden_layers: [128, 128]
-  dynamics_target_dims: 5
-  dynamics_use_normalized_vec: True
-  # HJB PINN-style regularizer for critic (value function)
-  hjb_loss_scale: 0.5
+  # HJB PINN-style regularizer for critic (value function), reward-max convention.
+  # Residual: r + grad V . f - rho V,  with r = -l  and  rho = -ln(gamma)/hjb_step_dt.
+  hjb_loss_scale: 1.0
   hjb_max_lin_vel: 0.5
-  hjb_max_ang_vel: 3.0
-  hjb_time_weight: 0.5
+  hjb_max_ang_vel: 1.5
+  hjb_time_weight: 1.0
   hjb_distance_weight: 0.5
   hjb_heading_weight: 0.2
   hjb_control_weight: 0.05
   hjb_progress_weight: 1.0
+  # Env step in seconds (decimation 2 * sim.dt 1/120 = 1/60). Used to derive
+  # the continuous-time discount rate rho that appears in the residual above.
+  hjb_step_dt: 0.0166666667
+  # Hamiltonian evaluation mode: "policy" (on-policy u) or "optimal" (analytic u* from dH/du=0)
+  hjb_hamiltonian_mode: optimal
   # vec layout: [dot, cross, cross-track-error, heading-error, vx, vy, wz, d_signed, heading_error, ...]
   hjb_vec_d_index: 5
   hjb_vec_psi_index: 6
