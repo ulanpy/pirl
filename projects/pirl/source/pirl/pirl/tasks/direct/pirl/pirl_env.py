@@ -41,6 +41,9 @@ class PirlEnv(DirectRLEnv):
         # Local path buffers
         self.path_manager = LocalPathManager(self.cfg, self.device, self.num_envs)
         self._latest_lidar_ranges_m = None
+        h_min, h_max = self.cfg.lidar_horizontal_fov_range
+        lidar_angles = torch.linspace(h_min, h_max, self.cfg.lidar_num_rays, device=self.device)
+        self._lidar_angles_rad = torch.deg2rad(lidar_angles)
         self.proximity = ProximityReward(self.cfg, self.device, self.num_envs)
         self.extras = {}
         # Current and previous actions (shape [num_envs, 2]); previous action is part of observation.
@@ -211,6 +214,11 @@ class PirlEnv(DirectRLEnv):
         lidar_ranges = torch.clamp(lidar_ranges, max=self.cfg.lidar.max_distance)
         lidar_ranges_m = lidar_ranges
         self._latest_lidar_ranges_m = lidar_ranges_m
+        num_rays = min(lidar_ranges_m.shape[1], self._lidar_angles_rad.shape[0])
+        nearest_ranges, nearest_indices = lidar_ranges_m[:, :num_rays].min(dim=1, keepdim=True)
+        nearest_bearing = self._lidar_angles_rad[nearest_indices.squeeze(-1)].unsqueeze(-1)
+        nearest_obstacle_x = nearest_ranges * torch.cos(nearest_bearing)
+        nearest_obstacle_y = nearest_ranges * torch.sin(nearest_bearing)
 
         robot_yaw = torch.atan2(self.forwards[:, 1], self.forwards[:, 0])
         heading_error = torch.atan2(
@@ -242,6 +250,8 @@ class PirlEnv(DirectRLEnv):
                 yaw_rate,
                 self.curr_path_error_signed,
                 heading_error,
+                nearest_obstacle_x,
+                nearest_obstacle_y,
                 path_obs,
                 prev_action_obs,
                 prev_reward_obs,

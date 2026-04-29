@@ -230,63 +230,6 @@ class RecurrentGaussianPolicy(GaussianMixin, Model):
         return mean, self.log_std_parameter, {"rnn": [rnn_next]}
 
 
-class RecurrentDeterministicValue(DeterministicMixin, Model):
-    def __init__(
-        self,
-        observation_space,
-        action_space,
-        device,
-        num_envs: int = 1,
-        sequence_length: int = 32,
-        gru_hidden_size: int = 128,
-        gru_num_layers: int = 1,
-        aux_dim: int = 0,
-        clip_actions: bool = False,
-        return_source: bool = False,
-        **kwargs,
-    ) -> None:
-        Model.__init__(self, observation_space, action_space, device)
-        DeterministicMixin.__init__(self, clip_actions=clip_actions)
-        self._vec_start, self._vec_dim, self._costmap_start, self._costmap_shape = get_vec_costmap_layout(
-            observation_space
-        )
-        self._num_envs = int(num_envs)
-        self._sequence_length = int(sequence_length)
-        self.backbone = _RecurrentBackbone(
-            vec_dim=self._vec_dim,
-            costmap_shape=self._costmap_shape,
-            gru_hidden_size=int(gru_hidden_size),
-            gru_num_layers=int(gru_num_layers),
-            aux_dim=int(aux_dim),
-        )
-        self.value_head = nn.Linear(int(gru_hidden_size), 1)
-
-    def get_specification(self) -> Mapping[str, Any]:
-        return {
-            "rnn": {
-                "sequence_length": self._sequence_length,
-                "sizes": [(self.backbone.gru.num_layers, self._num_envs, self.backbone.gru.hidden_size)],
-            }
-        }
-
-    def compute(self, inputs, role=""):
-        states = inputs["states"]
-        rnn_list = inputs.get("rnn", None)
-        rnn_state = rnn_list[0] if rnn_list else None
-        terminated = inputs.get("terminated", None)
-        feats, rnn_next = self.backbone(
-            states=states,
-            rnn_state=rnn_state,
-            sequence_length=self._sequence_length,
-            terminated=terminated,
-            vec_start=self._vec_start,
-            vec_dim=self._vec_dim,
-            costmap_start=self._costmap_start,
-            costmap_shape=self._costmap_shape,
-        )
-        return self.value_head(feats), {"rnn": [rnn_next]}
-
-
 class FeedForwardDeterministicValue(DeterministicMixin, Model):
     """Deterministic value model without recurrent state (vec+costmap fusion only)."""
 

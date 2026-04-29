@@ -125,12 +125,13 @@ Data flow summary:
 
 1. Environment step computes LiDAR, path projection, local path window, and geometric errors.
 2. Observations are split into:
-   - `vec` branch (alignment, velocities, `d`, `psi`, local path, previous action/reward components).
+  - `vec` branch (alignment, velocities, `d`, `psi`, nearest LiDAR obstacle point, local path,
+    previous action/reward components).
    - `costmap` branch (stacked local occupancy grids from LiDAR + inflation).
 3. Actor outputs normalized actions; env maps them to differential-drive wheel velocity targets.
 4. Rewards combine path progress, path error, heading alignment, proximity/collision, and optional
    reverse shaping.
-5. Agent update uses PPO losses plus an optional HJB residual on the critic.
+5. Agent update uses PPO losses plus an optional CBF-HJB residual on the critic.
 
 ## Testing Strategy
 
@@ -188,6 +189,7 @@ Data flow summary:
   - `source/pirl/pirl/tasks/direct/pirl/agents/obs_layout.py`
 - Feature flags via config:
   - HJB loss (`hjb_loss_scale`)
+  - LiDAR-CBF safety term (`hjb_cbf_enabled`)
   - reward term scales in env config
 - Runtime/env vars:
   - `> TODO: Document required Isaac Sim / Isaac Lab environment variables per deployment setup.`
@@ -196,7 +198,6 @@ Data flow summary:
 
 - `README.md`
 - `docs/pirl_path_contract_ros_like.md`
-- `docs/pirl_direct_pomdp_costmap.md`
 - `docs/ppo_aux_architecture_graph.md`
 - `docs/HJB_THEORY_TIME_DISTANCE.md`
 - `source/pirl/pirl/tasks/direct/pirl/pirl_env.py`

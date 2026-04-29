@@ -25,6 +25,26 @@ class _MinibatchLosses(NamedTuple):
     value_loss: torch.Tensor
     hjb_loss: torch.Tensor
     kl_divergence: torch.Tensor
+    hjb_residual_abs_mean: float
+    hjb_value_abs_mean: float
+    hjb_running_cost_mean: float
+    hjb_cbf_violation_rate: float
+    hjb_cbf_margin_mean: float
+    hjb_v_pre_cbf_mean: float
+    hjb_v_post_cbf_mean: float
+
+
+class _HjbResult(NamedTuple):
+    """HJB loss and detached diagnostics for one minibatch."""
+
+    loss: torch.Tensor
+    residual_abs_mean: float
+    value_abs_mean: float
+    running_cost_mean: float
+    cbf_violation_rate: float
+    cbf_margin_mean: float
+    v_pre_cbf_mean: float
+    v_post_cbf_mean: float
 
 
 # Merged into skrl PPO_DEFAULT_CONFIG; overridden by YAML ``agent:`` section.
@@ -54,6 +74,14 @@ PPOHjbRNN_default_config = {
     # for the reward-max HJB residual r + grad V . f - rho V. Default matches
     # PirlEnvCfg: decimation=2 * sim.dt=1/120 => dt = 1/60 s.
     "hjb_step_dt": 1.0 / 60.0,
+    # Optional LiDAR-derived CBF term. Disabled unless explicitly enabled in YAML.
+    "hjb_cbf_enabled": False,
+    "hjb_cbf_x_index": 7,
+    "hjb_cbf_y_index": 8,
+    "hjb_cbf_safe_radius": 0.30,
+    "hjb_cbf_kappa": 2.0,
+    "hjb_cbf_violation_weight": 1.0,
+    "hjb_cbf_projection_eps": 1e-3,
 }
 
 
@@ -104,6 +132,13 @@ class PPOHjbRNN(PPO_RNN):
             )
         self._hjb_vec_d_index = int(self.cfg.get("hjb_vec_d_index", 5))
         self._hjb_vec_psi_index = int(self.cfg.get("hjb_vec_psi_index", 6))
+        self._hjb_cbf_enabled = bool(self.cfg.get("hjb_cbf_enabled", False))
+        self._hjb_cbf_x_index = int(self.cfg.get("hjb_cbf_x_index", 7))
+        self._hjb_cbf_y_index = int(self.cfg.get("hjb_cbf_y_index", 8))
+        self._hjb_cbf_safe_radius = float(self.cfg.get("hjb_cbf_safe_radius", 0.30))
+        self._hjb_cbf_kappa = float(self.cfg.get("hjb_cbf_kappa", 2.0))
+        self._hjb_cbf_violation_weight = float(self.cfg.get("hjb_cbf_violation_weight", 1.0))
+        self._hjb_cbf_projection_eps = float(self.cfg.get("hjb_cbf_projection_eps", 1e-3))
         # Continuous-time discount rate matched to PPO's per-step discount.
         # PPO learns V(x) = E[sum gamma^t r_t]; the reward-max HJB Bellman at stationarity
         # is  r + grad V . f - rho V = 0  with rho = -ln(gamma)/dt. Without the rho V term
@@ -196,7 +231,7 @@ class PPOHjbRNN(PPO_RNN):
         sampled_states_raw: torch.Tensor,
         sampled_actions: torch.Tensor,
         sampled_terminated: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> _HjbResult:
         """Scaled mean-squared reward-max HJB residual on the critic (FP32); zero if disabled.
 
         Convention: PPO learns a reward-maximization value ``V_pi(x) = E[sum gamma^t r_t]``
@@ -210,7 +245,16 @@ class PPOHjbRNN(PPO_RNN):
         both drive V in the same direction as policy improves.
         """
         if self._hjb_loss_scale <= 0.0:
-            return torch.tensor(0.0, device=self.device)
+            return _HjbResult(
+                loss=torch.tensor(0.0, device=self.device),
+                residual_abs_mean=0.0,
+                value_abs_mean=0.0,
+                running_cost_mean=0.0,
+                cbf_violation_rate=0.0,
+                cbf_margin_mean=0.0,
+                v_pre_cbf_mean=0.0,
+                v_post_cbf_mean=0.0,
+            )
         if self._hjb_vec_d_index < 0 or self._hjb_vec_psi_index < 0:
             raise ValueError("hjb_vec_d_index and hjb_vec_psi_index must be non-negative.")
         with torch.autocast(device_type=self._device_type, enabled=False):
@@ -241,10 +285,15 @@ class PPOHjbRNN(PPO_RNN):
             )[0]
             grad_vec = torch.zeros_like(hjb_vec_raw) if grad_vec_full is None else grad_vec_full
             vec = hjb_vec_raw
-            if vec.shape[1] <= max(self._hjb_vec_d_index, self._hjb_vec_psi_index):
+            required_idx = max(self._hjb_vec_d_index, self._hjb_vec_psi_index)
+            if self._hjb_cbf_enabled:
+                required_idx = max(required_idx, self._hjb_cbf_x_index, self._hjb_cbf_y_index)
+            if vec.shape[1] <= required_idx:
                 raise ValueError(
                     "HJB vec indices out of range for current vec layout: "
-                    f"vec_dim={vec.shape[1]}, d_idx={self._hjb_vec_d_index}, psi_idx={self._hjb_vec_psi_index}"
+                    f"vec_dim={vec.shape[1]}, required_max_idx={required_idx}, "
+                    f"d_idx={self._hjb_vec_d_index}, psi_idx={self._hjb_vec_psi_index}, "
+                    f"cbf_x_idx={self._hjb_cbf_x_index}, cbf_y_idx={self._hjb_cbf_y_index}"
                 )
             # HJB state: x = [d, psi] (signed cross-track error, heading error).
             d_err = vec[:, self._hjb_vec_d_index : self._hjb_vec_d_index + 1]
@@ -268,8 +317,38 @@ class PPOHjbRNN(PPO_RNN):
                 w_ctrl = dVdpsi / (0.2 * control_w_t)
             else:
                 # Policy-evaluated Hamiltonian (on-policy residual).
-                v_ctrl = sampled_actions[:, 0:1].float() * self._hjb_max_lin_vel
-                w_ctrl = sampled_actions[:, 1:2].float() * self._hjb_max_ang_vel
+                # PPO stores raw Gaussian samples in memory, but the env clamps them to
+                # [-1, 1] before applying to wheels (see PirlEnv._pre_physics_step). Match
+                # the realized physical control here so HJB residual reflects what the
+                # robot actually executed instead of unbounded policy tails.
+                clamped_actions = torch.clamp(sampled_actions[:, 0:2].float(), min=-1.0, max=1.0)
+                v_ctrl = clamped_actions[:, 0:1] * self._hjb_max_lin_vel
+                w_ctrl = clamped_actions[:, 1:2] * self._hjb_max_ang_vel
+            v_pre_cbf = v_ctrl
+
+            cbf_violation = torch.zeros_like(v_ctrl)
+            cbf_margin = torch.zeros_like(v_ctrl)
+            if self._hjb_cbf_enabled:
+                v_ctrl = torch.clamp(v_ctrl, min=-self._hjb_max_lin_vel, max=self._hjb_max_lin_vel)
+                w_ctrl = torch.clamp(w_ctrl, min=-self._hjb_max_ang_vel, max=self._hjb_max_ang_vel)
+                obs_x = vec[:, self._hjb_cbf_x_index : self._hjb_cbf_x_index + 1]
+                obs_y = vec[:, self._hjb_cbf_y_index : self._hjb_cbf_y_index + 1]
+                safe_radius = torch.tensor(
+                    self._hjb_cbf_safe_radius,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                cbf_h = obs_x * obs_x + obs_y * obs_y - safe_radius * safe_radius
+                # For a static obstacle represented in the robot body frame:
+                # x_dot = -v + w*y, y_dot = -w*x, so h_dot = -2*x*v.
+                front_mask = obs_x > self._hjb_cbf_projection_eps
+                v_upper_bound = (self._hjb_cbf_kappa * cbf_h) / (
+                    2.0 * obs_x.clamp(min=self._hjb_cbf_projection_eps)
+                )
+                v_ctrl = torch.where(front_mask, torch.minimum(v_ctrl, v_upper_bound), v_ctrl)
+                v_ctrl = torch.clamp(v_ctrl, min=-self._hjb_max_lin_vel, max=self._hjb_max_lin_vel)
+                cbf_margin = -2.0 * obs_x * v_ctrl + self._hjb_cbf_kappa * cbf_h
+                cbf_violation = torch.where(front_mask, torch.relu(-cbf_margin), torch.zeros_like(cbf_margin))
             # Small-curvature local kinematics: d_dot = v sin psi, psi_dot = w.
             d_dot = v_ctrl * torch.sin(psi_err)
             psi_dot = w_ctrl
@@ -282,6 +361,7 @@ class PPOHjbRNN(PPO_RNN):
                 + self._hjb_heading_weight * (1.0 - torch.cos(psi_err))
                 + control_w_t * control_cost
                 - self._hjb_progress_weight * (v_ctrl * torch.cos(psi_err))
+                + self._hjb_cbf_violation_weight * (cbf_violation * cbf_violation)
             )
             # Reward-max continuous-time Bellman residual: r + grad V . f - rho V
             # with r = -l. rho V anchors the residual to zero at the optimum; without
@@ -292,7 +372,16 @@ class PPOHjbRNN(PPO_RNN):
                 + dVdpsi * psi_dot
                 - self._hjb_discount_rate * hjb_values_phys
             )
-            return self._hjb_loss_scale * torch.mean(hamiltonian * hamiltonian)
+            return _HjbResult(
+                loss=self._hjb_loss_scale * torch.mean(hamiltonian * hamiltonian),
+                residual_abs_mean=float(torch.mean(torch.abs(hamiltonian)).detach().item()),
+                value_abs_mean=float(torch.mean(torch.abs(hjb_values_phys)).detach().item()),
+                running_cost_mean=float(torch.mean(running_cost).detach().item()),
+                cbf_violation_rate=float((cbf_violation > 0.0).float().mean().detach().item()),
+                cbf_margin_mean=float(torch.mean(cbf_margin).detach().item()),
+                v_pre_cbf_mean=float(torch.mean(v_pre_cbf).detach().item()),
+                v_post_cbf_mean=float(torch.mean(v_ctrl).detach().item()),
+            )
 
     def _minibatch_losses(
         self,
@@ -338,14 +427,21 @@ class PPOHjbRNN(PPO_RNN):
                 )
             value_loss = self._value_loss_scale * F.mse_loss(sampled_returns, predicted_values)
 
-            hjb_loss = self._hjb_loss(sampled_states_raw, sampled_actions, sampled_terminated)
+            hjb = self._hjb_loss(sampled_states_raw, sampled_actions, sampled_terminated)
 
         return _MinibatchLosses(
             policy_loss=policy_loss,
             entropy_loss=entropy_loss,
             value_loss=value_loss,
-            hjb_loss=hjb_loss,
+            hjb_loss=hjb.loss,
             kl_divergence=kl_divergence,
+            hjb_residual_abs_mean=hjb.residual_abs_mean,
+            hjb_value_abs_mean=hjb.value_abs_mean,
+            hjb_running_cost_mean=hjb.running_cost_mean,
+            hjb_cbf_violation_rate=hjb.cbf_violation_rate,
+            hjb_cbf_margin_mean=hjb.cbf_margin_mean,
+            hjb_v_pre_cbf_mean=hjb.v_pre_cbf_mean,
+            hjb_v_post_cbf_mean=hjb.v_post_cbf_mean,
         )
 
     def _optimizer_step(self, total_loss: torch.Tensor) -> None:
@@ -388,6 +484,13 @@ class PPOHjbRNN(PPO_RNN):
         cumulative_value_loss: float,
         cumulative_entropy_loss: float,
         cumulative_hjb_loss: float,
+        cumulative_hjb_residual_abs_mean: float,
+        cumulative_hjb_value_abs_mean: float,
+        cumulative_hjb_running_cost_mean: float,
+        cumulative_hjb_cbf_violation_rate: float,
+        cumulative_hjb_cbf_margin_mean: float,
+        cumulative_hjb_v_pre_cbf_mean: float,
+        cumulative_hjb_v_post_cbf_mean: float,
         denom: float,
     ) -> None:
         """Write averaged losses and policy stats to experiment tracking (e.g. TensorBoard)."""
@@ -397,6 +500,13 @@ class PPOHjbRNN(PPO_RNN):
             self.track_data("Loss / Entropy loss", cumulative_entropy_loss / denom)
         if self._hjb_loss_scale > 0.0:
             self.track_data("Loss / HJB loss", cumulative_hjb_loss / denom)
+            self.track_data("HJB / residual abs mean", cumulative_hjb_residual_abs_mean / denom)
+            self.track_data("HJB / value phys abs mean", cumulative_hjb_value_abs_mean / denom)
+            self.track_data("HJB / running cost mean", cumulative_hjb_running_cost_mean / denom)
+            self.track_data("HJB / cbf violation rate", cumulative_hjb_cbf_violation_rate / denom)
+            self.track_data("HJB / cbf margin mean", cumulative_hjb_cbf_margin_mean / denom)
+            self.track_data("HJB / v pre cbf mean", cumulative_hjb_v_pre_cbf_mean / denom)
+            self.track_data("HJB / v post cbf mean", cumulative_hjb_v_post_cbf_mean / denom)
         self.track_data("Policy / Standard deviation", self.policy.distribution(role="policy").stddev.mean().item())
         if self._learning_rate_scheduler:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
@@ -447,6 +557,13 @@ class PPOHjbRNN(PPO_RNN):
         cumulative_entropy_loss = 0.0
         cumulative_value_loss = 0.0
         cumulative_hjb_loss = 0.0
+        cumulative_hjb_residual_abs_mean = 0.0
+        cumulative_hjb_value_abs_mean = 0.0
+        cumulative_hjb_running_cost_mean = 0.0
+        cumulative_hjb_cbf_violation_rate = 0.0
+        cumulative_hjb_cbf_margin_mean = 0.0
+        cumulative_hjb_v_pre_cbf_mean = 0.0
+        cumulative_hjb_v_post_cbf_mean = 0.0
 
         for epoch in range(self._learning_epochs):
             kl_divergences: List[torch.Tensor] = []
@@ -487,6 +604,13 @@ class PPOHjbRNN(PPO_RNN):
                 cumulative_policy_loss += float(L.policy_loss.item())
                 cumulative_value_loss += float(L.value_loss.item())
                 cumulative_hjb_loss += float(L.hjb_loss.item())
+                cumulative_hjb_residual_abs_mean += L.hjb_residual_abs_mean
+                cumulative_hjb_value_abs_mean += L.hjb_value_abs_mean
+                cumulative_hjb_running_cost_mean += L.hjb_running_cost_mean
+                cumulative_hjb_cbf_violation_rate += L.hjb_cbf_violation_rate
+                cumulative_hjb_cbf_margin_mean += L.hjb_cbf_margin_mean
+                cumulative_hjb_v_pre_cbf_mean += L.hjb_v_pre_cbf_mean
+                cumulative_hjb_v_post_cbf_mean += L.hjb_v_post_cbf_mean
                 if self._entropy_loss_scale:
                     cumulative_entropy_loss += float(L.entropy_loss.item())
 
@@ -498,5 +622,12 @@ class PPOHjbRNN(PPO_RNN):
             cumulative_value_loss,
             cumulative_entropy_loss,
             cumulative_hjb_loss,
+            cumulative_hjb_residual_abs_mean,
+            cumulative_hjb_value_abs_mean,
+            cumulative_hjb_running_cost_mean,
+            cumulative_hjb_cbf_violation_rate,
+            cumulative_hjb_cbf_margin_mean,
+            cumulative_hjb_v_pre_cbf_mean,
+            cumulative_hjb_v_post_cbf_mean,
             denom,
         )

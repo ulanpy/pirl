@@ -76,7 +76,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
             "vec": gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(5 + 2 + (path_segment_len * 2) + 2 + reward_component_dim,),
+                shape=(5 + 2 + 2 + (path_segment_len * 2) + 2 + reward_component_dim,),
                 dtype=np.float32,
             ),
             "costmap": gym.spaces.Box(
@@ -113,7 +113,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     dyn_obstacle_radius = 0.25               # cylinder radius, m
     dyn_obstacle_height = 1.0                # cylinder height, m
     dyn_obstacle_xy_range = ((-6.0, 6.0), (-6.0, 6.0))
-    dyn_obstacle_keepout_radius = 1.0        # free disc around env origin (robot spawn zone)
+    dyn_obstacle_keepout_radius = 0.5        # free disc around env origin (robot spawn zone)
     dyn_obstacle_min_separation = 1.5        # pairwise cylinder separation, m
     dyn_obstacle_motion_radius_range = (0.4, 1.0)
     dyn_obstacle_motion_speed_range = (0.2, 0.8)  # angular speed, rad/s
@@ -193,12 +193,12 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # at d=0.1 m it is -0.003/step (negligible, doesn't punish normal tracking noise).
     rew_scale_path_error = 0.3
     # Extra safety shaping terms (proximity/collision/reverse) are enabled.
-    rew_scale_collision = -15.0
+    rew_scale_collision = -60.0
     collision_robot_radius = 0.20  # slightly larger to keep collision signal aligned with proximity
     proximity_activation_distance = 0.9  # m
     proximity_exponential_rate = 2.0
     proximity_front_fov_deg = 360.0
-    rew_proximity_max_penalty = -0.05
+    rew_proximity_max_penalty = -0.5
     rew_scale_reverse = 0.0
     # Heading alignment coefficient (w3): reward adds w3 * cos(delta_heading) * forward_gate.
     # Gated by forward speed in _get_rewards(), so no bonus for "face path + reverse".
