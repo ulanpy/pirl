@@ -48,6 +48,9 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Push a new frame into history every N env steps so that K frames span ~1 s (at 60 env Hz: 4*15=60 steps)
     grid_history_interval_steps = 4
     grid_normalize = True  # normalize costs for RL input
+    # ObservationSchemaV2: each history frame becomes [cost, known_mask].
+    grid_channels_per_frame = 2
+    grid_observation_channels = grid_history_len * grid_channels_per_frame
     # --- Local path observation ---
     # Path is generated once at reset (no replanning inside episode).
     # Controller/reward both use nearest-point anchor on the unconsumed suffix (monotonic prune).
@@ -68,6 +71,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
         "reverse",
     )
     reward_component_dim = len(reward_component_names)
+    reward_component_obs_clip = 1.0
     # Curvature (ROS2-like local path: not a straight line).
     path_heading_noise_scale = 0.35  # rad per step; larger → more turns
     path_mid_turn_rad = 0.5  # extra turn in second half of path (rad), ±random
@@ -76,13 +80,13 @@ class PirlEnvCfg(DirectRLEnvCfg):
             "vec": gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(5 + 2 + 2 + (path_segment_len * 2) + 2 + reward_component_dim,),
+                shape=(2 + 2 + (path_segment_len * 2) + 2 + reward_component_dim,),
                 dtype=np.float32,
             ),
             "costmap": gym.spaces.Box(
-                low=-1.0,
+                low=0.0,
                 high=1.0,
-                shape=(grid_history_len, grid_width_cells, grid_width_cells),
+                shape=(grid_observation_channels, grid_width_cells, grid_width_cells),
                 dtype=np.float32,
             ),
         }

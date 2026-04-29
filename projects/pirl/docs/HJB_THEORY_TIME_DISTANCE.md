@@ -135,8 +135,8 @@ $$
 
 Therefore:
 
-- `hjb_vec_d_index = 5`
-- `hjb_vec_psi_index = 6`
+- `hjb_vec_d_index = 2`
+- `hjb_vec_psi_index = 3`
 
 ## 6) Raw vs normalized scale (important)
 

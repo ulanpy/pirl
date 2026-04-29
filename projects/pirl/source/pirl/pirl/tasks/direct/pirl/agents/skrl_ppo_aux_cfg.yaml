@@ -15,7 +15,7 @@ models:
     sequence_length: 64
     gru_hidden_size: 256
     gru_num_layers: 1
-    aux_dim: 9
+    aux_dim: 8
   value:
     class: FeedForwardDeterministicValue
     clip_actions: False
@@ -74,14 +74,14 @@ agent:
   hjb_step_dt: 0.0166666667
   # Hamiltonian evaluation mode: "policy" (on-policy u) or "optimal" (analytic u* from dH/du=0)
   hjb_hamiltonian_mode: policy
-  # vec layout: [dot, cross, cross-track-error, heading-error, vx, vy, wz, d_signed, heading_error, ...]
-  hjb_vec_d_index: 5
-  hjb_vec_psi_index: 6
-  # LiDAR-CBF safety term: vec layout keeps path indices after these two obstacle coordinates.
-  # [..., d_signed(5), heading_error(6), nearest_obstacle_x(7), nearest_obstacle_y(8), path_obs, ...]
-  hjb_cbf_enabled: true
-  hjb_cbf_x_index: 7
-  hjb_cbf_y_index: 8
+  # ObservationSchemaV2 vec layout:
+  # [vx, wz, d_signed, heading_error, path_obs..., prev_action, prev_reward]
+  hjb_vec_d_index: 2
+  hjb_vec_psi_index: 3
+  # Nearest-obstacle LiDAR coordinates were removed from vec; obstacle state now comes from costmap.
+  hjb_cbf_enabled: false
+  hjb_cbf_x_index: -1
+  hjb_cbf_y_index: -1
   hjb_cbf_safe_radius: 1.5
   hjb_cbf_kappa: 2.0
   hjb_cbf_violation_weight: 2.0

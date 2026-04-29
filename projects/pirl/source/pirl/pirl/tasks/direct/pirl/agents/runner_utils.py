@@ -15,14 +15,12 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                 from .ppo_hjb_rnn import PPOHjbRNN, PPOHjbRNN_default_config
                 from .recurrent_models import (
                     FeedForwardDeterministicValue,
-                    RecurrentDeterministicValue,
                     RecurrentGaussianPolicy,
                 )
                 custom_components = {
                     "ppohjbrnn": PPOHjbRNN,
                     "ppohjbrnn_default_config": PPOHjbRNN_default_config,
                     "recurrentgaussianpolicy": RecurrentGaussianPolicy,
-                    "recurrentdeterministicvalue": RecurrentDeterministicValue,
                     "feedforwarddeterministicvalue": FeedForwardDeterministicValue,
                 }
                 if lname in custom_components:

@@ -186,3 +186,36 @@ class LocalPathManager:
             robot_quat_w.repeat_interleave(seg_len, dim=0), rel_seg_w_3.reshape(-1, 3)
         ).reshape(self.num_envs, seg_len, 3)[:, :, :2]
         return rel_seg_b.reshape(self.num_envs, -1)
+
+    def get_resampled_segment(
+        self,
+        robot_pos_w: torch.Tensor,
+        robot_quat_w: torch.Tensor,
+        curr_s: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return a fixed arc-length path window in base_link, matching a ROS2 adapter contract."""
+        seg_len = self.cfg.path_segment_len
+        spacing = float(self.cfg.path_point_spacing_m)
+        offsets = torch.arange(seg_len, device=self.device, dtype=curr_s.dtype).unsqueeze(0) * spacing
+        sample_s = curr_s + offsets
+        last_s = self.path_s[:, -1:].expand_as(sample_s)
+        sample_s = torch.minimum(sample_s, last_s)
+
+        sampled_w = torch.zeros((self.num_envs, seg_len, 2), device=self.device)
+        for env_idx in range(self.num_envs):
+            path_s = self.path_s[env_idx]
+            path_points = self.path_points_w[env_idx]
+            upper = torch.searchsorted(path_s, sample_s[env_idx], right=False).clamp(1, self.cfg.path_num_points - 1)
+            lower = upper - 1
+            s0 = path_s[lower]
+            s1 = path_s[upper]
+            alpha = ((sample_s[env_idx] - s0) / (s1 - s0).clamp(min=1e-6)).unsqueeze(-1)
+            sampled_w[env_idx] = path_points[lower] + alpha * (path_points[upper] - path_points[lower])
+
+        rel_seg_w = sampled_w - robot_pos_w.unsqueeze(1)
+        rel_seg_w_3 = torch.zeros((self.num_envs, seg_len, 3), device=self.device)
+        rel_seg_w_3[:, :, :2] = rel_seg_w
+        rel_seg_b = math_utils.quat_apply_inverse(
+            robot_quat_w.repeat_interleave(seg_len, dim=0), rel_seg_w_3.reshape(-1, 3)
+        ).reshape(self.num_envs, seg_len, 3)[:, :, :2]
+        return rel_seg_b.reshape(self.num_envs, -1)

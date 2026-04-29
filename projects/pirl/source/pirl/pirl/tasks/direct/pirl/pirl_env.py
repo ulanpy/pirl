@@ -171,14 +171,25 @@ class PirlEnv(DirectRLEnv):
         targets = torch.stack((omega_l, omega_r), dim=-1)
         self.robot.set_joint_velocity_target(targets, joint_ids=self.dof_idx)
 
-    def _get_observations(self) -> dict:
-        # Calculate forward vector in world frame
+    def _get_lidar_ranges_m(self) -> torch.Tensor:
+        """Return finite LiDAR ranges in meters for sim-side Nav2-like costmap generation."""
+        ray_hits_w = self.lidar.data.ray_hits_w
+        ray_starts_w = getattr(self.lidar, "_ray_starts_w", None)
+        if ray_starts_w is None:
+            raise RuntimeError("Lidar ray starts are not available for distance computation.")
+        lidar_ranges = torch.linalg.norm(ray_hits_w - ray_starts_w, dim=-1)
+        lidar_ranges = torch.where(
+            torch.isfinite(lidar_ranges),
+            lidar_ranges,
+            torch.tensor(self.cfg.lidar.max_distance, device=self.device),
+        )
+        return torch.clamp(lidar_ranges, max=self.cfg.lidar.max_distance)
+
+    def _update_path_observation_state(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         self.forwards = math_utils.quat_apply(
-            self.robot.data.root_quat_w, 
+            self.robot.data.root_quat_w,
             torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         )
-        
-        # Update path anchors and local geometric targets.
         robot_pos_w = self.robot.data.root_pos_w[:, :2]
         (
             self.commands,
@@ -190,35 +201,11 @@ class PirlEnv(DirectRLEnv):
             tangent_heading,
             heading_target,
         ) = self.path_manager.update_commands(robot_pos_w)
+        del tangent_heading
+
         # Final goal distance for termination diagnostics
         final_targets_w = self.path_manager.path_points_w[:, -1]
         self.final_goal_dist = torch.linalg.norm(final_targets_w - robot_pos_w, dim=-1, keepdim=True)
-
-        # Ego-motion in body frame
-        forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
-        lateral_speed = self.robot.data.root_com_lin_vel_b[:, 1].unsqueeze(-1)
-        yaw_rate = self.robot.data.root_com_ang_vel_b[:, 2].unsqueeze(-1)
-
-        # Lidar ranges normalized to [0, 1]
-        # MultiMeshRayCaster stores hit positions; compute distances from ray starts
-        ray_hits_w = self.lidar.data.ray_hits_w
-        ray_starts_w = getattr(self.lidar, "_ray_starts_w", None)
-        if ray_starts_w is None:
-            raise RuntimeError("Lidar ray starts are not available for distance computation.")
-        lidar_ranges = torch.linalg.norm(ray_hits_w - ray_starts_w, dim=-1)
-        lidar_ranges = torch.where(
-            torch.isfinite(lidar_ranges),
-            lidar_ranges,
-            torch.tensor(self.cfg.lidar.max_distance, device=self.device),
-        )
-        lidar_ranges = torch.clamp(lidar_ranges, max=self.cfg.lidar.max_distance)
-        lidar_ranges_m = lidar_ranges
-        self._latest_lidar_ranges_m = lidar_ranges_m
-        num_rays = min(lidar_ranges_m.shape[1], self._lidar_angles_rad.shape[0])
-        nearest_ranges, nearest_indices = lidar_ranges_m[:, :num_rays].min(dim=1, keepdim=True)
-        nearest_bearing = self._lidar_angles_rad[nearest_indices.squeeze(-1)].unsqueeze(-1)
-        nearest_obstacle_x = nearest_ranges * torch.cos(nearest_bearing)
-        nearest_obstacle_y = nearest_ranges * torch.sin(nearest_bearing)
 
         robot_yaw = torch.atan2(self.forwards[:, 1], self.forwards[:, 0])
         heading_error = torch.atan2(
@@ -227,36 +214,34 @@ class PirlEnv(DirectRLEnv):
         )
         # Heading reward is measured against lookahead-point bearing (last point in local window).
         self.path_heading_cos = torch.cos(heading_error)
-        grid_obs = self.costmap.build_image(lidar_ranges_m, robot_pos_w, robot_yaw)
+        return curr_idx, robot_pos_w, robot_yaw, heading_error
 
-        # path_obs: fixed-size sliding segment of the frozen episode path in base_link (x,y), flattened.
-        # Anchor index is re-selected every tick by nearest-point prune; no replanning in this setup.
-        path_obs = self.path_manager.get_segment(robot_pos_w, self.robot.data.root_quat_w, curr_idx)
-
-        prev_action_obs = self.prev_actions
-        prev_reward_obs = self.prev_reward_components
-
-        # Observation heading relation features are computed from command direction.
-        dot_cmd = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
-        cross_cmd = (
-            self.forwards[:, 0] * self.commands[:, 1] - self.forwards[:, 1] * self.commands[:, 0]
-        ).unsqueeze(-1)
-        vec_obs = torch.hstack(
+    def _build_vec_observation(
+        self,
+        robot_pos_w: torch.Tensor,
+        heading_error: torch.Tensor,
+    ) -> torch.Tensor:
+        ego_obs = torch.hstack(
             (
-                dot_cmd,
-                cross_cmd,
-                forward_speed,
-                lateral_speed,
-                yaw_rate,
-                self.curr_path_error_signed,
-                heading_error,
-                nearest_obstacle_x,
-                nearest_obstacle_y,
-                path_obs,
-                prev_action_obs,
-                prev_reward_obs,
+                self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1),
+                self.robot.data.root_com_ang_vel_b[:, 2].unsqueeze(-1),
             )
         )
+        tracking_obs = torch.hstack((self.curr_path_error_signed, heading_error))
+        path_obs = self.path_manager.get_resampled_segment(
+            robot_pos_w,
+            self.robot.data.root_quat_w,
+            self.curr_path_s,
+        )
+        memory_obs = torch.hstack((self.prev_actions, self.prev_reward_components))
+        return torch.hstack((ego_obs, tracking_obs, path_obs, memory_obs))
+
+    def _get_observations(self) -> dict:
+        _, robot_pos_w, robot_yaw, heading_error = self._update_path_observation_state()
+        lidar_ranges_m = self._get_lidar_ranges_m()
+        self._latest_lidar_ranges_m = lidar_ranges_m
+        grid_obs = self.costmap.build_image(lidar_ranges_m, robot_pos_w, robot_yaw)
+        vec_obs = self._build_vec_observation(robot_pos_w, heading_error)
         return {"policy": {"vec": vec_obs, "costmap": grid_obs}}
 
     def _get_rewards(self) -> torch.Tensor:
@@ -331,7 +316,11 @@ class PirlEnv(DirectRLEnv):
                 collision_val,
                 reverse_val,
             )
-            self.prev_reward_components = torch.cat(reward_components, dim=-1)
+            self.prev_reward_components = torch.clamp(
+                torch.cat(reward_components, dim=-1),
+                min=-float(self.cfg.reward_component_obs_clip),
+                max=float(self.cfg.reward_component_obs_clip),
+            )
             return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:

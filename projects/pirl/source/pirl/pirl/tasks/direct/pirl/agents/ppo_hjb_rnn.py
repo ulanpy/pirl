@@ -66,18 +66,18 @@ PPOHjbRNN_default_config = {
     # - "optimal": evaluate H*(x, grad V) using analytic argmin dH/du = 0
     "hjb_hamiltonian_mode": "optimal",
     # Preferred indices in vec for HJB state [d, psi].
-    # Current vec layout:
-    # [dot, cross, vx, vy, wz, d_signed, heading_error, path_obs..., prev_action, prev_reward]
-    "hjb_vec_d_index": 5,
-    "hjb_vec_psi_index": 6,
+    # ObservationSchemaV2 vec layout:
+    # [vx, wz, d_signed, heading_error, path_obs..., prev_action, prev_reward]
+    "hjb_vec_d_index": 2,
+    "hjb_vec_psi_index": 3,
     # Env step (seconds). Used to derive continuous-time discount rho = -ln(gamma)/dt
     # for the reward-max HJB residual r + grad V . f - rho V. Default matches
     # PirlEnvCfg: decimation=2 * sim.dt=1/120 => dt = 1/60 s.
     "hjb_step_dt": 1.0 / 60.0,
     # Optional LiDAR-derived CBF term. Disabled unless explicitly enabled in YAML.
     "hjb_cbf_enabled": False,
-    "hjb_cbf_x_index": 7,
-    "hjb_cbf_y_index": 8,
+    "hjb_cbf_x_index": -1,
+    "hjb_cbf_y_index": -1,
     "hjb_cbf_safe_radius": 0.30,
     "hjb_cbf_kappa": 2.0,
     "hjb_cbf_violation_weight": 1.0,
@@ -130,11 +130,11 @@ class PPOHjbRNN(PPO_RNN):
                 "hjb_hamiltonian_mode must be one of {'policy', 'optimal'}, "
                 f"got: {self._hjb_hamiltonian_mode}"
             )
-        self._hjb_vec_d_index = int(self.cfg.get("hjb_vec_d_index", 5))
-        self._hjb_vec_psi_index = int(self.cfg.get("hjb_vec_psi_index", 6))
+        self._hjb_vec_d_index = int(self.cfg.get("hjb_vec_d_index", 2))
+        self._hjb_vec_psi_index = int(self.cfg.get("hjb_vec_psi_index", 3))
         self._hjb_cbf_enabled = bool(self.cfg.get("hjb_cbf_enabled", False))
-        self._hjb_cbf_x_index = int(self.cfg.get("hjb_cbf_x_index", 7))
-        self._hjb_cbf_y_index = int(self.cfg.get("hjb_cbf_y_index", 8))
+        self._hjb_cbf_x_index = int(self.cfg.get("hjb_cbf_x_index", -1))
+        self._hjb_cbf_y_index = int(self.cfg.get("hjb_cbf_y_index", -1))
         self._hjb_cbf_safe_radius = float(self.cfg.get("hjb_cbf_safe_radius", 0.30))
         self._hjb_cbf_kappa = float(self.cfg.get("hjb_cbf_kappa", 2.0))
         self._hjb_cbf_violation_weight = float(self.cfg.get("hjb_cbf_violation_weight", 1.0))

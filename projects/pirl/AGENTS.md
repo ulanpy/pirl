@@ -1,104 +1,43 @@
 # Project Overview
 
-`pirl` is an Isaac Lab/Isaac Sim reinforcement-learning project for local obstacle avoidance with
-a tracked differential-drive robot in dynamic warehouse-like scenes. The repo provides a custom
-direct RL environment (`pirl.tasks`) with LiDAR-driven local costmaps, path-following rewards, and
-SKRL PPO-RNN training scripts, plus an optional HJB PINN-style critic regularizer.
+`pirl` is an Isaac Lab / Isaac Sim reinforcement-learning project for local obstacle avoidance with
+a tracked differential-drive robot in dynamic warehouse-like scenes. The project trains a SKRL
+PPO-RNN controller over LiDAR-derived local costmaps and path-following vector observations, with an
+optional HJB / CBF-style critic regularizer.
 
-## Repository Structure
+## Repository Map
 
-- `README.md` - setup and usage instructions for Isaac Lab template workflow.
-- `docs/` - project-specific design notes (path contract, POMDP/costmap notes, architecture graphs).
-- `scripts/` - runnable entrypoints for training, playbackЭто, по моему мнению, более удачный кандидат для дипломной работы, и сейчас объясню почему — а также как корректно обойти ваш справедливый страх по поводу шума лидара.
+- `README.md` - setup and Isaac Lab template usage notes.
+- `docs/` - project design notes, path contract, deployment observation notes, and architecture diagrams.
+- `scripts/` - runnable entrypoints for training, playback, environment listing, dummy agents, and ONNX export.
+- `source/pirl/` - Python package source and extension metadata.
+- `source/pirl/pirl/tasks/direct/pirl/` - main direct environment, path logic, rewards, and costmap code.
+- `source/pirl/pirl/tasks/direct/pirl/agents/` - custom PPO agent, recurrent models, observation layout, and configs.
+- `logs/` and `outputs/` - generated training artifacts and resolved configs.
+- `pyproject.toml` - repo-level lint, format, and pyright settings.
 
-, env listing, and dummy agents.
-- `source/` - Python package source (`source/pirl`) and extension packaging files.
-- `logs/` - training artifacts (TensorBoard/event logs, dumped params).
-- `outputs/` - Hydra run outputs and resolved configs.
-- `teleop_test.py` - local test utility script.
-- `pyproject.toml` - repo-level lint/format/type-check configuration.
+## Runtime Environment
 
-Key subfolders:
-
-- `scripts/skrl/` - SKRL train/play entrypoints.
-- `source/pirl/pirl/tasks/direct/pirl/` - main environment implementation and reward/path logic.
-- `source/pirl/pirl/tasks/direct/pirl/agents/` - PPO agent extensions, model definitions, configs.
-- `source/pirl/config/` - extension metadata (`extension.toml` etc.).
-
-## Build & Development Commands
+Isaac Sim code normally runs inside the Isaac container. Standard `python` may not exist there; use:
 
 ```bash
-# Runtime note (isaac_lab_pinn container):
-# Standard `python` is not used for project execution.
-# Use Isaac Sim launcher wrapper:
 ISAAC_PY="/isaac-sim/python.sh"
-
-# Install the project package in editable mode
-$ISAAC_PY -m pip install -e source/pirl
-```
-
-```bash
-# List available environments/tasks
 $ISAAC_PY scripts/list_envs.py
-```
-
-```bash
-# Train with SKRL PPO (default task from script args)
-$ISAAC_PY scripts/skrl/train.py --task=jettank
-```
-
-```bash
-# Play/evaluate a checkpoint
 $ISAAC_PY scripts/skrl/play.py --task=<TASK_NAME> --checkpoint=<PATH_TO_CHECKPOINT>
 ```
 
-```bash
-# Dummy-agent smoke tests
-$ISAAC_PY scripts/zero_agent.py --task=<TASK_NAME>
-$ISAAC_PY scripts/random_agent.py --task=<TASK_NAME>
-```
+Long training jobs should only be launched when explicitly needed:
 
 ```bash
-# Formatting / linting / hooks
-pre-commit run --all-files
-ruff check .
-ruff format .
+$ISAAC_PY scripts/skrl/train.py --task=jettank
 ```
 
-```bash
-# Type-check (if pyright is installed in your environment)
-pyright
-```
+For remote visual debugging, training can use `--livestream 1` over WebRTC/Tailscale; on the simulation PC,
+`--livestream 2` may be appropriate.
 
-```bash
-# Debugging notes
-# Always run project scripts via Isaac Sim launcher wrapper inside isaac_lab_pinn:
-# /isaac-sim/python.sh <script.py> [args...]
-```
-
-```bash
-# Deploy / release
-> TODO: Define release/publish workflow (wheel upload, extension registry, or container release).
-```
-
-## Code Style & Conventions
-
-- Python style is enforced with `ruff` (line length `120`, target `py310`) from root
-  `pyproject.toml`.
-- Format with `ruff format`; lint with `ruff check` (auto-fix allowed where safe).
-- Import ordering follows custom Isaac/Omniverse sections configured under `tool.ruff.lint.isort`.
-- Type-checking baseline is `pyright` with `typeCheckingMode = "basic"`.
-- Prefer clear, explicit names:
-  - modules/files: `snake_case.py`
-  - classes: `PascalCase`
-  - functions/vars: `snake_case`
-  - constants: `UPPER_SNAKE_CASE`
-- Config naming:
-  - env/task configs in `*_cfg.py` and YAML files in `agents/*_cfg.yaml`.
-- Commit message template (recommended):
-  - `<type>(<scope>): <short imperative summary>`
-  - Example: `feat(path): add signed cross-track error to vec observation`
-  - Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
+The AI agent usually runs inside the Isaac container. Do not run `git`, `ruff`, or `pre-commit` from this
+environment unless the user explicitly asks for it; host-side ownership/tooling often makes those checks noisy.
+Prefer Isaac Python checks only when they are useful for the change.
 
 ## Architecture Notes
 
@@ -123,82 +62,74 @@ flowchart LR
 
 Data flow summary:
 
-1. Environment step computes LiDAR, path projection, local path window, and geometric errors.
-2. Observations are split into:
-  - `vec` branch (alignment, velocities, `d`, `psi`, nearest LiDAR obstacle point, local path,
-    previous action/reward components).
-   - `costmap` branch (stacked local occupancy grids from LiDAR + inflation).
-3. Actor outputs normalized actions; env maps them to differential-drive wheel velocity targets.
-4. Rewards combine path progress, path error, heading alignment, proximity/collision, and optional
-   reverse shaping.
-5. Agent update uses PPO losses plus an optional CBF-HJB residual on the critic.
+1. `pirl_env.py` computes LiDAR ranges, local costmap, path projection, local path window, and geometric errors.
+2. Observations are split into `vec` and `costmap` branches. SKRL flattens Dict observations in sorted key order,
+   so the flat state order is `costmap` first, then `vec`.
+3. `RunningStandardScaler` normalizes the flat state during training. Its `running_mean` and `running_variance`
+   are saved in full SKRL checkpoints.
+4. `RecurrentGaussianPolicy` outputs normalized linear/yaw actions and a recurrent hidden state. The environment
+   maps normalized actions to differential-drive wheel velocity targets.
+5. Rewards combine path progress, path error, heading alignment, proximity/collision, and optional reverse shaping.
 
-## Testing Strategy
+## Deployment And ONNX
 
-- Current validation is primarily scenario/smoke-based (no dedicated `tests/` tree detected).
-- Local checks:
-  1. `/isaac-sim/python.sh scripts/list_envs.py` (task registration sanity).
-  2. `/isaac-sim/python.sh scripts/zero_agent.py --task=<TASK_NAME>` (env stepping stability).
-  3. `/isaac-sim/python.sh scripts/random_agent.py --task=<TASK_NAME>` (observation/action/reward pipeline).
-  4. Short PPO run (`/isaac-sim/python.sh scripts/skrl/train.py`) and inspect logs in `logs/skrl/...`.
-- Static checks:
-  - `pre-commit run --all-files`
-  - `ruff check .`
-  - `pyright` (when available)
-- CI:
-  - `> TODO: Document CI matrix and required pass criteria once workflow files are added.`
+The physical ROS2 controller consumes exported ONNX policies, usually converted from SKRL `.pt` checkpoints with
+`scripts/toOnnx.py`.
 
-## Security & Compliance
+Current deployment-facing actor inputs are:
 
-- Never commit secrets, private keys, tokens, or machine-local credentials.
-- Pre-commit includes `detect-private-key` and large-file checks; keep hooks enabled.
-- Treat `logs/` and `outputs/` as generated artifacts; do not include sensitive runtime dumps.
-- Dependency surface:
-  - package install defined in `source/pirl/setup.py` (`psutil` currently explicit).
-  - `> TODO: Add dependency vulnerability scanning policy (e.g., pip-audit/Snyk/GHAS).`
-- Licensing:
-  - repository headers indicate BSD-3-Clause from Isaac Lab template lineage.
-  - `> TODO: Add/verify top-level LICENSE file and third-party attribution section.`
+- `vec`: `[1, 36]`
+- `costmap`: `[1, 6, 100, 100]`
+- `rnn_state`: `[1, 1, 256]`
 
-## Agent Guardrails
+Current outputs are:
 
-- Do not edit generated run artifacts under `logs/` or `outputs/` unless explicitly requested.
-- Do not modify checkpoints/event files in-place; write new outputs instead.
-- Avoid broad refactors across unrelated modules in one change.
-- Prefer minimal, scoped edits in:
-  - `source/pirl/pirl/tasks/direct/pirl/*` for environment logic.
-  - `source/pirl/pirl/tasks/direct/pirl/agents/*` for policy/loss logic.
-- Require human review for:
-  - reward-definition changes,
-  - action/kinematics mapping,
-  - HJB loss math changes,
-  - config defaults that affect reproducibility.
-- Run at least one smoke command (zero/random agent or short train) after substantial logic edits.
-- Avoid launching multiple long Isaac Sim training jobs concurrently on the same machine.
+- `mean`: `[1, 2]` normalized `[linear, yaw]` action
+- `rnn_state_out`: `[1, 1, 256]`
 
-## Extensibility Hooks
+When changing anything that affects policy inputs, policy architecture, recurrent state size, action scaling, or
+state normalization, update `scripts/toOnnx.py` in the same change. This includes `vec` layout, costmap shape,
+Dict flattening assumptions, `RunningStandardScaler` behavior, GRU size/layers, `aux_dim`, and `mean_head`.
 
-- Task/environment config hooks:
-  - `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py`
-- Agent/trainer config hooks:
-  - `source/pirl/pirl/tasks/direct/pirl/agents/skrl_ppo_aux_cfg.yaml`
-- Custom model/loss extension points:
-  - `source/pirl/pirl/tasks/direct/pirl/agents/recurrent_models.py`
-  - `source/pirl/pirl/tasks/direct/pirl/agents/ppo_hjb_rnn.py`
-- Observation-layout mapping hook:
-  - `source/pirl/pirl/tasks/direct/pirl/agents/obs_layout.py`
-- Feature flags via config:
-  - HJB loss (`hjb_loss_scale`)
-  - LiDAR-CBF safety term (`hjb_cbf_enabled`)
-  - reward term scales in env config
-- Runtime/env vars:
-  - `> TODO: Document required Isaac Sim / Isaac Lab environment variables per deployment setup.`
+Prefer ONNX exports that keep C++ integration simple: separate `vec`, `costmap`, and `rnn_state` inputs, with
+SKRL flat ordering and state normalization embedded inside the ONNX wrapper. The ROS2 side should not need to
+reimplement Python Dict flattening or scaler slicing.
 
-## Further Reading
+## Development Principles
 
-- `README.md`
+- Keep edits scoped to the behavior being changed. Avoid broad refactors unless they directly reduce current
+  complexity.
+- Do not add generic guardrail, fallback, or boilerplate code. Prefer explicit invariants and simple failure modes.
+- Minimize maintenance overhead. Add abstractions only when they remove real duplication or match an established
+  local pattern.
+- Treat observation layout, action mapping, reward definitions, HJB/CBF math, and deployment export behavior as
+  coupled contracts. Changing one usually requires checking the others.
+- Do not modify generated checkpoints or event files in place. New exported artifacts may be written only when
+  explicitly requested.
+- Avoid launching multiple long Isaac Sim jobs at the same time.
+
+## Validation
+
+Use checks that fit the change. Smoke tests are optional: run them when they provide useful signal for the files
+being changed, and skip them for documentation-only or clearly local edits.
+
+- Observation/export smoke: `$ISAAC_PY scripts/check_observation_v2.py` or
+  `$ISAAC_PY scripts/toOnnx.py --checkpoint=<CHECKPOINT.pt> --output=<POLICY.onnx>`.
+- Runtime smoke, only when environment behavior changed: `$ISAAC_PY scripts/list_envs.py`,
+  `scripts/zero_agent.py`, or `scripts/random_agent.py`.
+- Avoid `git`, `ruff`, and `pre-commit` checks from inside the container unless explicitly requested.
+
+## Key Files
+
+- `source/pirl/pirl/tasks/direct/pirl/pirl_env.py`
+- `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py`
+- `source/pirl/pirl/tasks/direct/pirl/pirl_env_costmap.py`
+- `source/pirl/pirl/tasks/direct/pirl/agents/recurrent_models.py`
+- `source/pirl/pirl/tasks/direct/pirl/agents/ppo_hjb_rnn.py`
+- `source/pirl/pirl/tasks/direct/pirl/agents/obs_layout.py`
+- `source/pirl/pirl/tasks/direct/pirl/agents/skrl_ppo_aux_cfg.yaml`
+- `scripts/toOnnx.py`
+- `docs/DEPLOYMENT_OBSERVATION_SPACE.md`
 - `docs/pirl_path_contract_ros_like.md`
 - `docs/ppo_aux_architecture_graph.md`
 - `docs/HJB_THEORY_TIME_DISTANCE.md`
-- `source/pirl/pirl/tasks/direct/pirl/pirl_env.py`
-- `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py`

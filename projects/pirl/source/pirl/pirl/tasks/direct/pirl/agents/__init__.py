@@ -6,6 +6,5 @@
 from .ppo_hjb_rnn import PPOHjbRNN, PPOHjbRNN_default_config
 from .recurrent_models import (
     FeedForwardDeterministicValue,
-    RecurrentDeterministicValue,
     RecurrentGaussianPolicy,
 )

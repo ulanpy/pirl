@@ -74,10 +74,7 @@ class LocalCostmapBuilder:
         robot_pos_w: torch.Tensor | None = None,
         robot_yaw: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Build and return NCHW costmap history for CNN-style consumers.
-        If robot_pos_w (num_envs, 2) and robot_yaw (num_envs,) are provided, past
-        frames are warped into the current robot body frame.
-        """
+        """Build and return NCHW ObservationSchemaV2 costmap channels."""
         return self._build_grid_history(lidar_ranges_m, robot_pos_w, robot_yaw)
 
     def _warp_grid_to_current_frame(
@@ -210,27 +207,18 @@ class LocalCostmapBuilder:
                 self._pose_history[:, 0, 2] = y
         self._step_count += 1
         grid_obs = self.grid_history
-        # Warp past frames into current robot body frame when pose is provided
-        if (
-            robot_pos_w is not None
-            and robot_yaw is not None
-            and self.cfg.grid_history_len > 1
-        ):
-            grid_obs = grid_obs.clone()
-            for e in range(self.num_envs):
-                for k in range(1, self.cfg.grid_history_len):
-                    grid_obs[e, k] = self._warp_grid_to_current_frame(
-                        self.grid_history[e, k],
-                        self._pose_history[e, k, :2],
-                        self._pose_history[e, k, 2],
-                        robot_pos_w[e],
-                        robot_yaw[e] if robot_yaw.dim() == 1 else robot_yaw[e, 0],
-                    )
         if self.cfg.grid_normalize:
-            grid_obs = torch.where(
-                grid_obs == self.cfg.grid_unknown_cost,
-                torch.tensor(-1.0, device=self.device),
+            known_mask = (grid_obs != self.cfg.grid_unknown_cost).float()
+            cost = torch.where(
+                known_mask.bool(),
                 grid_obs / self.cfg.grid_lethal_cost,
+                torch.tensor(0.0, device=self.device),
+            )
+            grid_obs = torch.stack((cost, known_mask), dim=2).reshape(
+                self.num_envs,
+                self.cfg.grid_history_len * self.cfg.grid_channels_per_frame,
+                self.grid_width_cells,
+                self.grid_width_cells,
             )
         return grid_obs
 

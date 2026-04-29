@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOperatorIssue=false, reportPrivateImportUsage=false, reportPrivateUsage=false
 """Export the PIRL recurrent actor policy checkpoint to ONNX.
 
 This script reconstructs the current PIRL recurrent actor architecture from the
@@ -12,12 +13,15 @@ repository defaults and exports a deployment-oriented ONNX graph with explicit:
 
 The exported model is intended for controller-side deterministic inference
 using the actor mean action and explicit GRU hidden-state carry-over.
+
+The ONNX graph embeds the saved SKRL ``RunningStandardScaler`` state by default.
+Controller code should feed deployment observations in ObservationSchemaV2:
+``vec`` and a Nav2-style ``costmap`` encoded as cost + known-mask history channels.
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 from pathlib import Path
 from typing import Any
 
@@ -137,10 +141,20 @@ class RecurrentGaussianPolicy(torch.nn.Module):
             gru_num_layers=int(gru_num_layers),
             aux_dim=int(aux_dim),
         )
-        self.mean_head = torch.nn.Linear(int(gru_hidden_size), int(action_dim))
+        self.mean_head = torch.nn.Sequential(
+            torch.nn.Linear(int(gru_hidden_size), 128),
+            torch.nn.ELU(),
+            torch.nn.Linear(128, 64),
+            torch.nn.ELU(),
+            torch.nn.Linear(64, int(action_dim)),
+        )
         self.log_std_parameter = torch.nn.Parameter(torch.full((int(action_dim),), -1.0))
 
-    def compute(self, inputs: dict[str, Any], role: str = "") -> tuple[torch.Tensor, torch.Tensor, dict[str, list[torch.Tensor]]]:
+    def compute(
+        self,
+        inputs: dict[str, Any],
+        role: str = "",
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, list[torch.Tensor]]]:
         del role
         states = inputs["states"]
         rnn_list = inputs.get("rnn", None)
@@ -202,6 +216,29 @@ def extract_policy_state_dict(checkpoint_obj: Any) -> dict[str, torch.Tensor]:
     )
 
 
+def extract_state_preprocessor_state_dict(checkpoint_obj: Any) -> dict[str, torch.Tensor]:
+    """Extract the saved SKRL RunningStandardScaler state from a checkpoint."""
+    if not isinstance(checkpoint_obj, dict):
+        raise RuntimeError("Expected a dict checkpoint containing `state_preprocessor`.")
+
+    candidate = checkpoint_obj.get("state_preprocessor")
+    if isinstance(candidate, dict) and candidate:
+        return candidate
+
+    for outer_key in ("agent", "modules", "state_dict", "checkpoint"):
+        outer = checkpoint_obj.get(outer_key)
+        if not isinstance(outer, dict):
+            continue
+        candidate = outer.get("state_preprocessor")
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+
+    raise RuntimeError(
+        "Could not extract `state_preprocessor` from checkpoint. "
+        "Use --skip-state-normalization only if normalization is applied outside ONNX."
+    )
+
+
 class ExportableRecurrentPolicy(torch.nn.Module):
     """Deployment wrapper with explicit vec/costmap/rnn inputs and mean/rnn outputs.
 
@@ -210,9 +247,34 @@ class ExportableRecurrentPolicy(torch.nn.Module):
     which is the most likely source of the ORT load failure on the robot side.
     """
 
-    def __init__(self, policy: RecurrentGaussianPolicy) -> None:
+    def __init__(
+        self,
+        policy: RecurrentGaussianPolicy,
+        state_preprocessor_state_dict: dict[str, torch.Tensor] | None,
+        scaler_epsilon: float,
+        scaler_clip_threshold: float,
+    ) -> None:
         super().__init__()
         self.policy = policy
+        self.scaler_epsilon = float(scaler_epsilon)
+        self.scaler_clip_threshold = float(scaler_clip_threshold)
+
+        c, h, w = self.policy._costmap_shape
+        flat_dim = (c * h * w) + self.policy._vec_dim
+        if state_preprocessor_state_dict is None:
+            running_mean = torch.zeros(flat_dim, dtype=torch.float32)
+            running_variance = torch.ones(flat_dim, dtype=torch.float32)
+        else:
+            running_mean = state_preprocessor_state_dict["running_mean"].float()
+            running_variance = state_preprocessor_state_dict["running_variance"].float()
+            if running_mean.numel() != flat_dim or running_variance.numel() != flat_dim:
+                raise ValueError(
+                    "State preprocessor size mismatch. "
+                    f"Expected {flat_dim}, got mean={running_mean.numel()} variance={running_variance.numel()}."
+                )
+
+        self.register_buffer("state_mean", running_mean.reshape(1, -1))
+        self.register_buffer("state_std", torch.sqrt(running_variance).reshape(1, -1))
 
     @staticmethod
     def _gru_cell(
@@ -240,8 +302,13 @@ class ExportableRecurrentPolicy(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch = vec.shape[0]
         flat_costmap = costmap.reshape(batch, -1)
-        # skrl Dict flattening uses sorted key order: "costmap", then "vec"
+        # skrl Dict flattening uses sorted key order: "costmap", then "vec".
         flat_states = torch.cat((flat_costmap, vec), dim=-1)
+        flat_states = torch.clamp(
+            (flat_states - self.state_mean) / (self.state_std + self.scaler_epsilon),
+            min=-self.scaler_clip_threshold,
+            max=self.scaler_clip_threshold,
+        )
         vec_dim = self.policy._vec_dim
         c, h, w = self.policy._costmap_shape
         costmap_flat_dim = c * h * w
@@ -295,14 +362,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export PIRL recurrent actor checkpoint to ONNX.")
     parser.add_argument("--checkpoint", required=True, help="Path to the PyTorch/skrl checkpoint file.")
     parser.add_argument("--output", required=True, help="Path to the output ONNX file.")
-    parser.add_argument("--vec-dim", type=int, default=39, help="Vector observation dimension.")
-    parser.add_argument("--costmap-channels", type=int, default=4, help="Costmap channel count.")
+    parser.add_argument("--vec-dim", type=int, default=36, help="Vector observation dimension.")
+    parser.add_argument("--costmap-channels", type=int, default=6, help="Costmap channel count.")
     parser.add_argument("--costmap-cells", type=int, default=100, help="Costmap width/height in cells.")
     parser.add_argument("--action-dim", type=int, default=2, help="Action dimension.")
     parser.add_argument("--gru-hidden-size", type=int, default=256, help="GRU hidden size.")
     parser.add_argument("--gru-num-layers", type=int, default=1, help="GRU layer count.")
-    parser.add_argument("--aux-dim", type=int, default=9, help="Auxiliary vector tail dimension.")
-    parser.add_argument("--sequence-length", type=int, default=64, help="Training sequence length metadata.")
+    parser.add_argument("--aux-dim", type=int, default=8, help="Auxiliary vector tail dimension.")
     parser.add_argument(
         "--batch-size",
         type=int,
@@ -311,6 +377,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dynamic-batch", action="store_true", help="Export with dynamic batch axes.")
     parser.add_argument("--opset", type=int, default=16, help="ONNX opset version.")
+    parser.add_argument(
+        "--skip-state-normalization",
+        action="store_true",
+        help="Do not embed the checkpoint's RunningStandardScaler in ONNX.",
+    )
+    parser.add_argument("--scaler-epsilon", type=float, default=1.0e-8, help="RunningStandardScaler epsilon.")
+    parser.add_argument(
+        "--scaler-clip-threshold",
+        type=float,
+        default=5.0,
+        help="RunningStandardScaler output clipping threshold.",
+    )
     return parser.parse_args()
 
 
@@ -335,7 +413,7 @@ def main() -> None:
     )
     policy.eval()
 
-    checkpoint_obj = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint_obj = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     policy_state_dict = extract_policy_state_dict(checkpoint_obj)
     load_result = policy.load_state_dict(policy_state_dict, strict=True)
     if load_result.missing_keys or load_result.unexpected_keys:
@@ -345,7 +423,16 @@ def main() -> None:
             f"Unexpected keys: {load_result.unexpected_keys}"
         )
 
-    export_model = ExportableRecurrentPolicy(policy).eval()
+    state_preprocessor_state_dict = None
+    if not args.skip_state_normalization:
+        state_preprocessor_state_dict = extract_state_preprocessor_state_dict(checkpoint_obj)
+
+    export_model = ExportableRecurrentPolicy(
+        policy=policy,
+        state_preprocessor_state_dict=state_preprocessor_state_dict,
+        scaler_epsilon=args.scaler_epsilon,
+        scaler_clip_threshold=args.scaler_clip_threshold,
+    ).eval()
 
     dummy_vec = torch.zeros((args.batch_size, args.vec_dim), dtype=torch.float32)
     dummy_costmap = torch.zeros(
@@ -380,7 +467,13 @@ def main() -> None:
             **export_kwargs,
         )
 
+    normalization = "embedded" if state_preprocessor_state_dict is not None else "external/disabled"
     print(f"Exported ONNX policy to: {output_path}")
+    print(
+        "Inputs: vec "
+        f"{tuple(dummy_vec.shape)}, costmap {tuple(dummy_costmap.shape)}, rnn_state {tuple(dummy_rnn_state.shape)}"
+    )
+    print(f"State normalization: {normalization}")
 
 
 if __name__ == "__main__":
