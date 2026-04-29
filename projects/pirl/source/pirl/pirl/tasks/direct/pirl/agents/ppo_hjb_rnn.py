@@ -53,9 +53,9 @@ PPOHjbRNN_default_config = {
     "hjb_loss_scale": 0.5,
     # Differential-drive kinematics scales for normalized actions.
     "hjb_max_lin_vel": 0.5,
-    "hjb_max_ang_vel": 3.0,
+    "hjb_max_ang_vel": 1.5,
     # Running cost weights in Hamiltonian.
-    "hjb_time_weight": 1.0,
+    "hjb_time_weight": 0.5,
     "hjb_distance_weight": 0.2,
     "hjb_heading_weight": 0.2,
     "hjb_control_weight": 0.05,
@@ -258,6 +258,7 @@ class PPOHjbRNN(PPO_RNN):
         if self._hjb_vec_d_index < 0 or self._hjb_vec_psi_index < 0:
             raise ValueError("hjb_vec_d_index and hjb_vec_psi_index must be non-negative.")
         with torch.autocast(device_type=self._device_type, enabled=False):
+            # получение физических значений состояний из сырых наблюдений без нормализации
             hjb_states_raw = sampled_states_raw.detach().clone().float().requires_grad_(True)
             hjb_states = self._state_preprocessor(hjb_states_raw, train=False)
             hjb_rnn_value: dict = {}
