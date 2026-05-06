@@ -72,6 +72,12 @@ class PirlEnvCfg(DirectRLEnvCfg):
     )
     reward_component_dim = len(reward_component_names)
     reward_component_obs_clip = 1.0
+    # ObservationSchemaV2.1: K sector-wise LiDAR hit positions in body frame, used by both the
+    # policy (extra geometry features for the vec MLP) and HJB (extends Hamiltonian dynamics
+    # with body-frame obstacle kinematics, see docs/HJB_THEORY_TIME_DISTANCE.md).
+    # Set to 0 to disable and shrink vec back to V2 layout.
+    hjb_lidar_sector_count = 16
+    hjb_lidar_xy_dim = hjb_lidar_sector_count * 2
     # Curvature (ROS2-like local path: not a straight line).
     path_heading_noise_scale = 0.35  # rad per step; larger → more turns
     path_mid_turn_rad = 0.5  # extra turn in second half of path (rad), ±random
@@ -80,7 +86,9 @@ class PirlEnvCfg(DirectRLEnvCfg):
             "vec": gym.spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(2 + 2 + (path_segment_len * 2) + 2 + reward_component_dim,),
+                shape=(
+                    2 + 2 + (path_segment_len * 2) + hjb_lidar_xy_dim + 2 + reward_component_dim,
+                ),
                 dtype=np.float32,
             ),
             "costmap": gym.spaces.Box(

@@ -73,19 +73,16 @@ agent:
   # the continuous-time discount rate rho that appears in the residual above.
   hjb_step_dt: 0.0166666667
   # Hamiltonian evaluation mode: "policy" (on-policy u) or "optimal" (analytic u* from dH/du=0)
-  hjb_hamiltonian_mode: policy
-  # ObservationSchemaV2 vec layout:
-  # [vx, wz, d_signed, heading_error, path_obs..., prev_action, prev_reward]
+  hjb_hamiltonian_mode: optimal
+  # ObservationSchemaV2.1 vec layout (68 floats):
+  # [vx, wz, d_signed, heading_error, path_window(24), lidar_sectors(32), prev_action(2), prev_reward(6)]
   hjb_vec_d_index: 2
   hjb_vec_psi_index: 3
-  # Nearest-obstacle LiDAR coordinates were removed from vec; obstacle state now comes from costmap.
-  hjb_cbf_enabled: false
-  hjb_cbf_x_index: -1
-  hjb_cbf_y_index: -1
-  hjb_cbf_safe_radius: 1.5
-  hjb_cbf_kappa: 2.0
-  hjb_cbf_violation_weight: 2.0
-  hjb_cbf_projection_eps: 1.0e-03
+  # LiDAR sector hits in body frame, used to extend HJB Hamiltonian dynamics with
+  # static-obstacle body-frame kinematics: x_dot = -v + w*y, y_dot = -w*x. Must match
+  # PirlEnvCfg.hjb_lidar_sector_count and the position appended in PirlEnv._build_vec_observation.
+  hjb_lidar_hits_start_index: 28
+  hjb_lidar_sector_count: 16
   time_limit_bootstrap: False
   # logging and checkpoint
   experiment:

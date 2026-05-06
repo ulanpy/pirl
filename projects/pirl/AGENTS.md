@@ -2,8 +2,9 @@
 
 `pirl` is an Isaac Lab / Isaac Sim reinforcement-learning project for local obstacle avoidance with
 a tracked differential-drive robot in dynamic warehouse-like scenes. The project trains a SKRL
-PPO-RNN controller over LiDAR-derived local costmaps and path-following vector observations, with an
-optional HJB / CBF-style critic regularizer.
+PPO-RNN controller over LiDAR-derived local costmaps, path-following vector observations, and
+per-sector LiDAR hit positions, with an optional HJB-style critic regularizer that uses both the
+path-tracking error state and body-frame static-obstacle kinematics.
 
 ## Repository Map
 
@@ -76,9 +77,9 @@ Data flow summary:
 The physical ROS2 controller consumes exported ONNX policies, usually converted from SKRL `.pt` checkpoints with
 `scripts/toOnnx.py`.
 
-Current deployment-facing actor inputs are:
+Current deployment-facing actor inputs (ObservationSchemaV2.1) are:
 
-- `vec`: `[1, 36]`
+- `vec`: `[1, 68]` — ego (2) + tracking (2) + path window (24) + LiDAR sectors (32) + memory (8)
 - `costmap`: `[1, 6, 100, 100]`
 - `rnn_state`: `[1, 1, 256]`
 

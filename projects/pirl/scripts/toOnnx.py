@@ -15,8 +15,9 @@ The exported model is intended for controller-side deterministic inference
 using the actor mean action and explicit GRU hidden-state carry-over.
 
 The ONNX graph embeds the saved SKRL ``RunningStandardScaler`` state by default.
-Controller code should feed deployment observations in ObservationSchemaV2:
-``vec`` and a Nav2-style ``costmap`` encoded as cost + known-mask history channels.
+Controller code should feed deployment observations in ObservationSchemaV2.1:
+``vec`` (68 floats: ego + tracking + path window + 16 LiDAR sector hits + memory)
+and a Nav2-style ``costmap`` encoded as cost + known-mask history channels.
 """
 
 from __future__ import annotations
@@ -362,7 +363,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export PIRL recurrent actor checkpoint to ONNX.")
     parser.add_argument("--checkpoint", required=True, help="Path to the PyTorch/skrl checkpoint file.")
     parser.add_argument("--output", required=True, help="Path to the output ONNX file.")
-    parser.add_argument("--vec-dim", type=int, default=36, help="Vector observation dimension.")
+    parser.add_argument("--vec-dim", type=int, default=68, help="Vector observation dimension.")
     parser.add_argument("--costmap-channels", type=int, default=6, help="Costmap channel count.")
     parser.add_argument("--costmap-cells", type=int, default=100, help="Costmap width/height in cells.")
     parser.add_argument("--action-dim", type=int, default=2, help="Action dimension.")

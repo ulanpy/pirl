@@ -28,10 +28,7 @@ class _MinibatchLosses(NamedTuple):
     hjb_residual_abs_mean: float
     hjb_value_abs_mean: float
     hjb_running_cost_mean: float
-    hjb_cbf_violation_rate: float
-    hjb_cbf_margin_mean: float
-    hjb_v_pre_cbf_mean: float
-    hjb_v_post_cbf_mean: float
+    hjb_lidar_grad_term_abs_mean: float
 
 
 class _HjbResult(NamedTuple):
@@ -41,10 +38,7 @@ class _HjbResult(NamedTuple):
     residual_abs_mean: float
     value_abs_mean: float
     running_cost_mean: float
-    cbf_violation_rate: float
-    cbf_margin_mean: float
-    v_pre_cbf_mean: float
-    v_post_cbf_mean: float
+    lidar_grad_term_abs_mean: float
 
 
 # Merged into skrl PPO_DEFAULT_CONFIG; overridden by YAML ``agent:`` section.
@@ -66,22 +60,21 @@ PPOHjbRNN_default_config = {
     # - "optimal": evaluate H*(x, grad V) using analytic argmin dH/du = 0
     "hjb_hamiltonian_mode": "optimal",
     # Preferred indices in vec for HJB state [d, psi].
-    # ObservationSchemaV2 vec layout:
-    # [vx, wz, d_signed, heading_error, path_obs..., prev_action, prev_reward]
+    # ObservationSchemaV2.1 vec layout:
+    # [vx, wz, d_signed, heading_error, path_obs..., lidar_sector_xy..., prev_action, prev_reward]
     "hjb_vec_d_index": 2,
     "hjb_vec_psi_index": 3,
     # Env step (seconds). Used to derive continuous-time discount rho = -ln(gamma)/dt
     # for the reward-max HJB residual r + grad V . f - rho V. Default matches
     # PirlEnvCfg: decimation=2 * sim.dt=1/120 => dt = 1/60 s.
     "hjb_step_dt": 1.0 / 60.0,
-    # Optional LiDAR-derived CBF term. Disabled unless explicitly enabled in YAML.
-    "hjb_cbf_enabled": False,
-    "hjb_cbf_x_index": -1,
-    "hjb_cbf_y_index": -1,
-    "hjb_cbf_safe_radius": 0.30,
-    "hjb_cbf_kappa": 2.0,
-    "hjb_cbf_violation_weight": 1.0,
-    "hjb_cbf_projection_eps": 1e-3,
+    # Optional LiDAR-sector hit positions used to extend HJB dynamics (Schema V2.1).
+    # When ``hjb_lidar_sector_count > 0``, HJB Hamiltonian is augmented with
+    # ``sum_k (dV/dx_k * x_dot_k + dV/dy_k * y_dot_k)`` for each sector hit at vec slot
+    # ``[hjb_lidar_hits_start_index : start + 2 * sector_count]``.
+    # Body-frame static-obstacle kinematics: x_dot = -v + w*y, y_dot = -w*x.
+    "hjb_lidar_hits_start_index": -1,
+    "hjb_lidar_sector_count": 0,
 }
 
 
@@ -132,13 +125,12 @@ class PPOHjbRNN(PPO_RNN):
             )
         self._hjb_vec_d_index = int(self.cfg.get("hjb_vec_d_index", 2))
         self._hjb_vec_psi_index = int(self.cfg.get("hjb_vec_psi_index", 3))
-        self._hjb_cbf_enabled = bool(self.cfg.get("hjb_cbf_enabled", False))
-        self._hjb_cbf_x_index = int(self.cfg.get("hjb_cbf_x_index", -1))
-        self._hjb_cbf_y_index = int(self.cfg.get("hjb_cbf_y_index", -1))
-        self._hjb_cbf_safe_radius = float(self.cfg.get("hjb_cbf_safe_radius", 0.30))
-        self._hjb_cbf_kappa = float(self.cfg.get("hjb_cbf_kappa", 2.0))
-        self._hjb_cbf_violation_weight = float(self.cfg.get("hjb_cbf_violation_weight", 1.0))
-        self._hjb_cbf_projection_eps = float(self.cfg.get("hjb_cbf_projection_eps", 1e-3))
+        self._hjb_lidar_start = int(self.cfg.get("hjb_lidar_hits_start_index", -1))
+        self._hjb_lidar_K = int(self.cfg.get("hjb_lidar_sector_count", 0))
+        if self._hjb_lidar_K > 0 and self._hjb_lidar_start < 0:
+            raise ValueError(
+                "hjb_lidar_sector_count > 0 requires a non-negative hjb_lidar_hits_start_index."
+            )
         # Continuous-time discount rate matched to PPO's per-step discount.
         # PPO learns V(x) = E[sum gamma^t r_t]; the reward-max HJB Bellman at stationarity
         # is  r + grad V . f - rho V = 0  with rho = -ln(gamma)/dt. Without the rho V term
@@ -250,10 +242,7 @@ class PPOHjbRNN(PPO_RNN):
                 residual_abs_mean=0.0,
                 value_abs_mean=0.0,
                 running_cost_mean=0.0,
-                cbf_violation_rate=0.0,
-                cbf_margin_mean=0.0,
-                v_pre_cbf_mean=0.0,
-                v_post_cbf_mean=0.0,
+                lidar_grad_term_abs_mean=0.0,
             )
         if self._hjb_vec_d_index < 0 or self._hjb_vec_psi_index < 0:
             raise ValueError("hjb_vec_d_index and hjb_vec_psi_index must be non-negative.")
@@ -287,14 +276,14 @@ class PPOHjbRNN(PPO_RNN):
             grad_vec = torch.zeros_like(hjb_vec_raw) if grad_vec_full is None else grad_vec_full
             vec = hjb_vec_raw
             required_idx = max(self._hjb_vec_d_index, self._hjb_vec_psi_index)
-            if self._hjb_cbf_enabled:
-                required_idx = max(required_idx, self._hjb_cbf_x_index, self._hjb_cbf_y_index)
+            if self._hjb_lidar_K > 0:
+                required_idx = max(required_idx, self._hjb_lidar_start + 2 * self._hjb_lidar_K - 1)
             if vec.shape[1] <= required_idx:
                 raise ValueError(
                     "HJB vec indices out of range for current vec layout: "
                     f"vec_dim={vec.shape[1]}, required_max_idx={required_idx}, "
                     f"d_idx={self._hjb_vec_d_index}, psi_idx={self._hjb_vec_psi_index}, "
-                    f"cbf_x_idx={self._hjb_cbf_x_index}, cbf_y_idx={self._hjb_cbf_y_index}"
+                    f"lidar_start={self._hjb_lidar_start}, lidar_K={self._hjb_lidar_K}"
                 )
             # HJB state: x = [d, psi] (signed cross-track error, heading error).
             d_err = vec[:, self._hjb_vec_d_index : self._hjb_vec_d_index + 1]
@@ -325,34 +314,27 @@ class PPOHjbRNN(PPO_RNN):
                 clamped_actions = torch.clamp(sampled_actions[:, 0:2].float(), min=-1.0, max=1.0)
                 v_ctrl = clamped_actions[:, 0:1] * self._hjb_max_lin_vel
                 w_ctrl = clamped_actions[:, 1:2] * self._hjb_max_ang_vel
-            v_pre_cbf = v_ctrl
 
-            cbf_violation = torch.zeros_like(v_ctrl)
-            cbf_margin = torch.zeros_like(v_ctrl)
-            if self._hjb_cbf_enabled:
-                v_ctrl = torch.clamp(v_ctrl, min=-self._hjb_max_lin_vel, max=self._hjb_max_lin_vel)
-                w_ctrl = torch.clamp(w_ctrl, min=-self._hjb_max_ang_vel, max=self._hjb_max_ang_vel)
-                obs_x = vec[:, self._hjb_cbf_x_index : self._hjb_cbf_x_index + 1]
-                obs_y = vec[:, self._hjb_cbf_y_index : self._hjb_cbf_y_index + 1]
-                safe_radius = torch.tensor(
-                    self._hjb_cbf_safe_radius,
-                    device=self.device,
-                    dtype=torch.float32,
-                )
-                cbf_h = obs_x * obs_x + obs_y * obs_y - safe_radius * safe_radius
-                # For a static obstacle represented in the robot body frame:
-                # x_dot = -v + w*y, y_dot = -w*x, so h_dot = -2*x*v.
-                front_mask = obs_x > self._hjb_cbf_projection_eps
-                v_upper_bound = (self._hjb_cbf_kappa * cbf_h) / (
-                    2.0 * obs_x.clamp(min=self._hjb_cbf_projection_eps)
-                )
-                v_ctrl = torch.where(front_mask, torch.minimum(v_ctrl, v_upper_bound), v_ctrl)
-                v_ctrl = torch.clamp(v_ctrl, min=-self._hjb_max_lin_vel, max=self._hjb_max_lin_vel)
-                cbf_margin = -2.0 * obs_x * v_ctrl + self._hjb_cbf_kappa * cbf_h
-                cbf_violation = torch.where(front_mask, torch.relu(-cbf_margin), torch.zeros_like(cbf_margin))
             # Small-curvature local kinematics: d_dot = v sin psi, psi_dot = w.
             d_dot = v_ctrl * torch.sin(psi_err)
             psi_dot = w_ctrl
+            # Optional Schema V2.1 extension: per-sector LiDAR hit positions in body frame
+            # are slotted into vec at [start, start + 2K). For a static obstacle expressed
+            # in the robot body frame:  x_dot_k = -v + w * y_k,  y_dot_k = -w * x_k.
+            # Their contribution to grad V . f is sum_k (dV/dx_k * x_dot_k + dV/dy_k * y_dot_k).
+            lidar_grad_term = torch.zeros_like(d_err)
+            if self._hjb_lidar_K > 0:
+                start = self._hjb_lidar_start
+                end = start + 2 * self._hjb_lidar_K
+                lidar_xy = vec[:, start:end].reshape(-1, self._hjb_lidar_K, 2)
+                grad_lidar = grad_vec[:, start:end].reshape(-1, self._hjb_lidar_K, 2)
+                x_k = lidar_xy[:, :, 0]
+                y_k = lidar_xy[:, :, 1]
+                dV_dx = grad_lidar[:, :, 0]
+                dV_dy = grad_lidar[:, :, 1]
+                x_dot_k = -v_ctrl + w_ctrl * y_k
+                y_dot_k = -w_ctrl * x_k
+                lidar_grad_term = (dV_dx * x_dot_k + dV_dy * y_dot_k).sum(dim=1, keepdim=True)
             # Running cost model (acts as a physics-informed prior on V shape):
             # l = w_t + w_d d^2 + w_psi (1 - cos psi) + w_u (v^2 + 0.1 w^2) - w_p v cos psi.
             control_cost = v_ctrl * v_ctrl + 0.1 * (w_ctrl * w_ctrl)
@@ -362,7 +344,6 @@ class PPOHjbRNN(PPO_RNN):
                 + self._hjb_heading_weight * (1.0 - torch.cos(psi_err))
                 + control_w_t * control_cost
                 - self._hjb_progress_weight * (v_ctrl * torch.cos(psi_err))
-                + self._hjb_cbf_violation_weight * (cbf_violation * cbf_violation)
             )
             # Reward-max continuous-time Bellman residual: r + grad V . f - rho V
             # with r = -l. rho V anchors the residual to zero at the optimum; without
@@ -371,6 +352,7 @@ class PPOHjbRNN(PPO_RNN):
                 -running_cost
                 + dVdd * d_dot
                 + dVdpsi * psi_dot
+                + lidar_grad_term
                 - self._hjb_discount_rate * hjb_values_phys
             )
             return _HjbResult(
@@ -378,10 +360,9 @@ class PPOHjbRNN(PPO_RNN):
                 residual_abs_mean=float(torch.mean(torch.abs(hamiltonian)).detach().item()),
                 value_abs_mean=float(torch.mean(torch.abs(hjb_values_phys)).detach().item()),
                 running_cost_mean=float(torch.mean(running_cost).detach().item()),
-                cbf_violation_rate=float((cbf_violation > 0.0).float().mean().detach().item()),
-                cbf_margin_mean=float(torch.mean(cbf_margin).detach().item()),
-                v_pre_cbf_mean=float(torch.mean(v_pre_cbf).detach().item()),
-                v_post_cbf_mean=float(torch.mean(v_ctrl).detach().item()),
+                lidar_grad_term_abs_mean=float(
+                    torch.mean(torch.abs(lidar_grad_term)).detach().item()
+                ),
             )
 
     def _minibatch_losses(
@@ -439,10 +420,7 @@ class PPOHjbRNN(PPO_RNN):
             hjb_residual_abs_mean=hjb.residual_abs_mean,
             hjb_value_abs_mean=hjb.value_abs_mean,
             hjb_running_cost_mean=hjb.running_cost_mean,
-            hjb_cbf_violation_rate=hjb.cbf_violation_rate,
-            hjb_cbf_margin_mean=hjb.cbf_margin_mean,
-            hjb_v_pre_cbf_mean=hjb.v_pre_cbf_mean,
-            hjb_v_post_cbf_mean=hjb.v_post_cbf_mean,
+            hjb_lidar_grad_term_abs_mean=hjb.lidar_grad_term_abs_mean,
         )
 
     def _optimizer_step(self, total_loss: torch.Tensor) -> None:
@@ -488,10 +466,7 @@ class PPOHjbRNN(PPO_RNN):
         cumulative_hjb_residual_abs_mean: float,
         cumulative_hjb_value_abs_mean: float,
         cumulative_hjb_running_cost_mean: float,
-        cumulative_hjb_cbf_violation_rate: float,
-        cumulative_hjb_cbf_margin_mean: float,
-        cumulative_hjb_v_pre_cbf_mean: float,
-        cumulative_hjb_v_post_cbf_mean: float,
+        cumulative_hjb_lidar_grad_term_abs_mean: float,
         denom: float,
     ) -> None:
         """Write averaged losses and policy stats to experiment tracking (e.g. TensorBoard)."""
@@ -504,10 +479,11 @@ class PPOHjbRNN(PPO_RNN):
             self.track_data("HJB / residual abs mean", cumulative_hjb_residual_abs_mean / denom)
             self.track_data("HJB / value phys abs mean", cumulative_hjb_value_abs_mean / denom)
             self.track_data("HJB / running cost mean", cumulative_hjb_running_cost_mean / denom)
-            self.track_data("HJB / cbf violation rate", cumulative_hjb_cbf_violation_rate / denom)
-            self.track_data("HJB / cbf margin mean", cumulative_hjb_cbf_margin_mean / denom)
-            self.track_data("HJB / v pre cbf mean", cumulative_hjb_v_pre_cbf_mean / denom)
-            self.track_data("HJB / v post cbf mean", cumulative_hjb_v_post_cbf_mean / denom)
+            if self._hjb_lidar_K > 0:
+                self.track_data(
+                    "HJB / lidar grad term abs mean",
+                    cumulative_hjb_lidar_grad_term_abs_mean / denom,
+                )
         self.track_data("Policy / Standard deviation", self.policy.distribution(role="policy").stddev.mean().item())
         if self._learning_rate_scheduler:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
@@ -561,10 +537,7 @@ class PPOHjbRNN(PPO_RNN):
         cumulative_hjb_residual_abs_mean = 0.0
         cumulative_hjb_value_abs_mean = 0.0
         cumulative_hjb_running_cost_mean = 0.0
-        cumulative_hjb_cbf_violation_rate = 0.0
-        cumulative_hjb_cbf_margin_mean = 0.0
-        cumulative_hjb_v_pre_cbf_mean = 0.0
-        cumulative_hjb_v_post_cbf_mean = 0.0
+        cumulative_hjb_lidar_grad_term_abs_mean = 0.0
 
         for epoch in range(self._learning_epochs):
             kl_divergences: List[torch.Tensor] = []
@@ -608,10 +581,7 @@ class PPOHjbRNN(PPO_RNN):
                 cumulative_hjb_residual_abs_mean += L.hjb_residual_abs_mean
                 cumulative_hjb_value_abs_mean += L.hjb_value_abs_mean
                 cumulative_hjb_running_cost_mean += L.hjb_running_cost_mean
-                cumulative_hjb_cbf_violation_rate += L.hjb_cbf_violation_rate
-                cumulative_hjb_cbf_margin_mean += L.hjb_cbf_margin_mean
-                cumulative_hjb_v_pre_cbf_mean += L.hjb_v_pre_cbf_mean
-                cumulative_hjb_v_post_cbf_mean += L.hjb_v_post_cbf_mean
+                cumulative_hjb_lidar_grad_term_abs_mean += L.hjb_lidar_grad_term_abs_mean
                 if self._entropy_loss_scale:
                     cumulative_entropy_loss += float(L.entropy_loss.item())
 
@@ -626,9 +596,6 @@ class PPOHjbRNN(PPO_RNN):
             cumulative_hjb_residual_abs_mean,
             cumulative_hjb_value_abs_mean,
             cumulative_hjb_running_cost_mean,
-            cumulative_hjb_cbf_violation_rate,
-            cumulative_hjb_cbf_margin_mean,
-            cumulative_hjb_v_pre_cbf_mean,
-            cumulative_hjb_v_post_cbf_mean,
+            cumulative_hjb_lidar_grad_term_abs_mean,
             denom,
         )

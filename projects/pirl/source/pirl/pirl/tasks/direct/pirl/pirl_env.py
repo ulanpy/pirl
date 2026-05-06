@@ -44,6 +44,24 @@ class PirlEnv(DirectRLEnv):
         h_min, h_max = self.cfg.lidar_horizontal_fov_range
         lidar_angles = torch.linspace(h_min, h_max, self.cfg.lidar_num_rays, device=self.device)
         self._lidar_angles_rad = torch.deg2rad(lidar_angles)
+        # Precompute per-sector ray membership for HJB LiDAR encoding (Schema V2.1).
+        # Sector k contains rays whose angle falls in the k-th equal slice of the configured FOV.
+        sector_count = int(self.cfg.hjb_lidar_sector_count)
+        self._lidar_sector_count = sector_count
+        if sector_count > 0:
+            sector_width_deg = (h_max - h_min) / sector_count
+            ray_angles_deg = torch.linspace(h_min, h_max, self.cfg.lidar_num_rays, device=self.device)
+            ray_sector_idx = (
+                ((ray_angles_deg - h_min) / sector_width_deg).floor().long().clamp(0, sector_count - 1)
+            )
+            sector_ray_mask = torch.zeros(
+                (sector_count, self.cfg.lidar_num_rays), dtype=torch.bool, device=self.device
+            )
+            for k in range(sector_count):
+                sector_ray_mask[k] = ray_sector_idx == k
+            self._sector_ray_mask = sector_ray_mask
+        else:
+            self._sector_ray_mask = torch.zeros((0, self.cfg.lidar_num_rays), dtype=torch.bool, device=self.device)
         self.proximity = ProximityReward(self.cfg, self.device, self.num_envs)
         self.extras = {}
         # Current and previous actions (shape [num_envs, 2]); previous action is part of observation.
@@ -162,7 +180,7 @@ class PirlEnv(DirectRLEnv):
 
         self.lidar._debug_vis_callback = _safe_debug_callback
 
-    def _apply_action(self) -> None:
+    def _apply_action(self) -> None: 
         # Map normalized actions to cmd_vel, then to wheel angular speeds
         v = self.actions[:, 0] * self.cfg.max_lin_vel
         w = self.actions[:, 1] * self.cfg.max_ang_vel
@@ -184,6 +202,32 @@ class PirlEnv(DirectRLEnv):
             torch.tensor(self.cfg.lidar.max_distance, device=self.device),
         )
         return torch.clamp(lidar_ranges, max=self.cfg.lidar.max_distance)
+
+    def _compute_sector_lidar_hits(self, lidar_ranges_m: torch.Tensor) -> torch.Tensor:
+        """Encode min-range LiDAR hit per FOV sector as ``(x, y)`` in body frame.
+
+        For each of the ``K`` equal angular sectors, find the ray with the minimum range and
+        emit its hit position ``(r * cos(theta), r * sin(theta))``. Empty/all-miss sectors
+        return the maximum-range placeholder along the ray that achieved the minimum (i.e.,
+        ``max_distance`` along that bearing); HJB residual treats far hits as effectively
+        contributing nothing because ``dV/d(x_k, y_k)`` is small there.
+        """
+        num_envs = lidar_ranges_m.shape[0]
+        K = self._lidar_sector_count
+        if K <= 0:
+            return torch.zeros((num_envs, 0), device=self.device)
+        # Sentinel value for rays outside the current sector when computing a per-sector argmin.
+        sentinel = float(self.cfg.lidar.max_distance) * 10.0
+        sentinel_tensor = torch.full_like(lidar_ranges_m, sentinel)
+        sector_xy = torch.zeros((num_envs, K, 2), device=self.device)
+        for k in range(K):
+            mask = self._sector_ray_mask[k].unsqueeze(0)
+            masked_ranges = torch.where(mask, lidar_ranges_m, sentinel_tensor)
+            min_vals, min_idx = torch.min(masked_ranges, dim=1)
+            bearings = self._lidar_angles_rad[min_idx]
+            sector_xy[:, k, 0] = min_vals * torch.cos(bearings)
+            sector_xy[:, k, 1] = min_vals * torch.sin(bearings)
+        return sector_xy.reshape(num_envs, 2 * K)
 
     def _update_path_observation_state(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         self.forwards = math_utils.quat_apply(
@@ -220,6 +264,7 @@ class PirlEnv(DirectRLEnv):
         self,
         robot_pos_w: torch.Tensor,
         heading_error: torch.Tensor,
+        lidar_sector_hits: torch.Tensor,
     ) -> torch.Tensor:
         ego_obs = torch.hstack(
             (
@@ -234,14 +279,18 @@ class PirlEnv(DirectRLEnv):
             self.curr_path_s,
         )
         memory_obs = torch.hstack((self.prev_actions, self.prev_reward_components))
-        return torch.hstack((ego_obs, tracking_obs, path_obs, memory_obs))
+        # Layout (Schema V2.1): ego + tracking + path + lidar_sectors + memory.
+        # Memory stays at the tail so RecurrentGaussianPolicy ``aux_dim`` keeps slicing
+        # ``[prev_action, prev_reward_components]`` regardless of LiDAR sector count.
+        return torch.hstack((ego_obs, tracking_obs, path_obs, lidar_sector_hits, memory_obs))
 
     def _get_observations(self) -> dict:
         _, robot_pos_w, robot_yaw, heading_error = self._update_path_observation_state()
         lidar_ranges_m = self._get_lidar_ranges_m()
         self._latest_lidar_ranges_m = lidar_ranges_m
         grid_obs = self.costmap.build_image(lidar_ranges_m, robot_pos_w, robot_yaw)
-        vec_obs = self._build_vec_observation(robot_pos_w, heading_error)
+        lidar_sector_hits = self._compute_sector_lidar_hits(lidar_ranges_m)
+        vec_obs = self._build_vec_observation(robot_pos_w, heading_error, lidar_sector_hits)
         return {"policy": {"vec": vec_obs, "costmap": grid_obs}}
 
     def _get_rewards(self) -> torch.Tensor:
