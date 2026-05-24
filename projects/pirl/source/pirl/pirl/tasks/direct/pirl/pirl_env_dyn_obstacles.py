@@ -91,6 +91,11 @@ class DynamicObstacles:
         self._radius = torch.zeros(shape, dtype=torch.float32, device=device)
         self._phase = torch.zeros(shape, dtype=torch.float32, device=device)
         self._omega = torch.zeros(shape, dtype=torch.float32, device=device)
+        # Optional manual control override per (env, slot). When enabled, step()
+        # uses the provided local XY/yaw instead of circular-motion integration.
+        self._manual_override = torch.zeros(shape, dtype=torch.bool, device=device)
+        self._manual_xy = torch.zeros((*shape, 2), dtype=torch.float32, device=device)
+        self._manual_yaw = torch.zeros(shape, dtype=torch.float32, device=device)
 
         self._z_world = float(cfg.dyn_obstacle_z_world)
         self._collection: RigidObjectCollection | None = None
@@ -209,6 +214,10 @@ class DynamicObstacles:
         self._radius[env_ids_t] = radii
         self._phase[env_ids_t] = phases
         self._omega[env_ids_t] = omegas
+        # Reset manual overrides for re-initialized envs.
+        self._manual_override[env_ids_t] = False
+        self._manual_xy[env_ids_t] = 0.0
+        self._manual_yaw[env_ids_t] = 0.0
 
         # --- 7. Compute initial world poses for ALL slots of the affected envs.
         # Active slots placed at anchor+orbit, inactive slots parked at hidden_z.
@@ -240,6 +249,44 @@ class DynamicObstacles:
 
         self._collection.write_object_pose_to_sim(pose, env_ids=env_ids_t)
 
+    # ---------------------------------------------------------- manual control
+
+    def set_manual_obstacle_pose(
+        self,
+        env_id: int,
+        slot_id: int,
+        local_xy: torch.Tensor,
+        yaw: float,
+    ) -> None:
+        """Enable manual control of one obstacle slot and set its local pose.
+
+        Args:
+            env_id: Environment index [0, num_envs).
+            slot_id: Obstacle slot index [0, slot_count).
+            local_xy: Local XY coordinates in the env frame (shape: [2]).
+            yaw: Obstacle yaw in radians (env frame).
+        """
+        e = int(env_id)
+        s = int(slot_id)
+        if e < 0 or e >= self.num_envs:
+            raise ValueError(f"env_id out of range: {e}")
+        if s < 0 or s >= self.slot_count:
+            raise ValueError(f"slot_id out of range: {s}")
+        xy = local_xy.to(device=self.device, dtype=torch.float32).reshape(2)
+        self._manual_override[e, s] = True
+        self._manual_xy[e, s] = xy
+        self._manual_yaw[e, s] = float(yaw)
+
+    def clear_manual_obstacle_pose(self, env_id: int, slot_id: int) -> None:
+        """Disable manual control override for one obstacle slot."""
+        e = int(env_id)
+        s = int(slot_id)
+        if e < 0 or e >= self.num_envs:
+            raise ValueError(f"env_id out of range: {e}")
+        if s < 0 or s >= self.slot_count:
+            raise ValueError(f"slot_id out of range: {s}")
+        self._manual_override[e, s] = False
+
     # ------------------------------------------------------------------- step
 
     def step(self, dt: float, env_origins: torch.Tensor) -> None:
@@ -266,6 +313,18 @@ class DynamicObstacles:
         qw = torch.cos(half)
         qz = torch.sin(half)
         zeros = torch.zeros_like(qw)
+
+        if torch.any(self._manual_override):
+            manual_world_x = origins[:, 0:1] + self._manual_xy[..., 0]
+            manual_world_y = origins[:, 1:2] + self._manual_xy[..., 1]
+            manual_half = 0.5 * self._manual_yaw
+            manual_qw = torch.cos(manual_half)
+            manual_qz = torch.sin(manual_half)
+            world_x = torch.where(self._manual_override, manual_world_x, world_x)
+            world_y = torch.where(self._manual_override, manual_world_y, world_y)
+            z = torch.where(self._manual_override, torch.full_like(z, self._z_world), z)
+            qw = torch.where(self._manual_override, manual_qw, qw)
+            qz = torch.where(self._manual_override, manual_qz, qz)
 
         pose = torch.stack((world_x, world_y, z, qw, zeros, zeros, qz), dim=-1)
         self._collection.write_object_pose_to_sim(pose)

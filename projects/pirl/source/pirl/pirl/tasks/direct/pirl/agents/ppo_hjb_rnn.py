@@ -334,7 +334,9 @@ class PPOHjbRNN(PPO_RNN):
                 dV_dy = grad_lidar[:, :, 1]
                 x_dot_k = -v_ctrl + w_ctrl * y_k
                 y_dot_k = -w_ctrl * x_k
-                lidar_grad_term = (dV_dx * x_dot_k + dV_dy * y_dot_k).sum(dim=1, keepdim=True)
+                # Mean over sectors keeps HJB scale approximately K-invariant
+                # (avoids over-conservative behavior when sector_count grows).
+                lidar_grad_term = (dV_dx * x_dot_k + dV_dy * y_dot_k).mean(dim=1, keepdim=True)
             # Running cost model (acts as a physics-informed prior on V shape):
             # l = w_t + w_d d^2 + w_psi (1 - cos psi) + w_u (v^2 + 0.1 w^2) - w_p v cos psi.
             control_cost = v_ctrl * v_ctrl + 0.1 * (w_ctrl * w_ctrl)

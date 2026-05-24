@@ -61,7 +61,7 @@ agent:
   rewards_shaper_scale: 1.0
   # HJB PINN-style regularizer for critic (value function), reward-max convention.
   # Residual: r + grad V . f - rho V,  with r = -l  and  rho = -ln(gamma)/hjb_step_dt.
-  hjb_loss_scale: 1.0
+  hjb_loss_scale: 0.0
   hjb_max_lin_vel: 0.5
   hjb_max_ang_vel: 1.5
   hjb_time_weight: 0.5

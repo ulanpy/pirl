@@ -205,12 +205,13 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # at d=0.1 m it is -0.003/step (negligible, doesn't punish normal tracking noise).
     rew_scale_path_error = 0.3
     # Extra safety shaping terms (proximity/collision/reverse) are enabled.
-    rew_scale_collision = -60.0
+    # Tuned to reduce "freezing" behavior near obstacles while preserving safety pressure.
+    rew_scale_collision = -25.0
     collision_robot_radius = 0.20  # slightly larger to keep collision signal aligned with proximity
-    proximity_activation_distance = 0.9  # m
+    proximity_activation_distance = 0.4  # m
     proximity_exponential_rate = 2.0
     proximity_front_fov_deg = 360.0
-    rew_proximity_max_penalty = -0.5
+    rew_proximity_max_penalty = -0.15
     rew_scale_reverse = 0.0
     # Heading alignment coefficient (w3): reward adds w3 * cos(delta_heading) * forward_gate.
     # Gated by forward speed in _get_rewards(), so no bonus for "face path + reverse".
