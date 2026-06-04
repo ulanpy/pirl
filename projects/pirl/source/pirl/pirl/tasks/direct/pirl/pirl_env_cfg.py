@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from pirl.robots.jettank import JETTANK_CFG
+from pirl.robots.burger import BURGER_CFG
 
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
@@ -24,9 +24,8 @@ class PirlEnvCfg(DirectRLEnvCfg):
     episode_length_s = 15.0
     # - spaces definition
     action_space = 2
-    # Real EAI G4: 360 deg, 0.28 deg resolution
-    # For now, limit rear visibility due to chassis occlusion and reduce rays for faster iteration
-    lidar_horizontal_fov_range = (-100.0, 100.0)
+    # Burger LDS works with full 360-degree visibility.
+    lidar_horizontal_fov_range = (-180.0, 180.0)
     lidar_horizontal_res = 1.0
     lidar_num_rays = math.ceil(
         (lidar_horizontal_fov_range[1] - lidar_horizontal_fov_range[0]) / lidar_horizontal_res
@@ -132,16 +131,16 @@ class PirlEnvCfg(DirectRLEnvCfg):
     dyn_obstacle_z_world = 0.5               # cylinder centre height, m (= height/2 above ground)
 
     # robot(s)
-    robot_cfg: ArticulationCfg = JETTANK_CFG.replace(
+    robot_cfg: ArticulationCfg = BURGER_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
     )
-    robot_cfg.init_state.pos = (0.0, 0.0, 0.03) 
+    robot_cfg.init_state.pos = (0.0, 0.0, 0.02)
     
     # sensors
     # Empty scene: MultiMeshRayCaster requires at least one target; use ground so rays can hit floor or max_distance
     lidar = MultiMeshRayCasterCfg(
-        prim_path="/World/envs/env_.*/Robot/lidar_link",
-        # Use lidar_link pose from URDF directly.
+        prim_path="/World/envs/env_.*/Robot/base_scan",
+        # Use base_scan pose from URDF directly.
         offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0)),
         # Rays rotate with robot heading/body.
         ray_alignment="base",
@@ -188,13 +187,13 @@ class PirlEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=50, env_spacing=35.0, replicate_physics=True)
 
     # controllable joints (explicit left/right order)
-    dof_names = ["left_wheel_joint", "right_wheel_joint"]
+    dof_names = ["wheel_left_joint", "wheel_right_joint"]
 
     # cmd_vel limits and robot geometry (for wheel speed conversion)
-    max_lin_vel = 0.5  # m/s
-    max_ang_vel = 1.5  # rad/s
-    wheel_radius = 0.03  # m (60mm diameter)
-    track_width = 0.242  # m
+    max_lin_vel = 0.22  # m/s
+    max_ang_vel = 2.84  # rad/s
+    wheel_radius = 0.033  # m
+    track_width = 0.16  # m
     
     # Core reward: r = w1*(s_t - s_{t-1}) - w2*d_path^2 + w3*cos(delta_heading)
     rew_scale_progress = 10.0
@@ -207,7 +206,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Extra safety shaping terms (proximity/collision/reverse) are enabled.
     # Tuned to reduce "freezing" behavior near obstacles while preserving safety pressure.
     rew_scale_collision = -25.0
-    collision_robot_radius = 0.20  # slightly larger to keep collision signal aligned with proximity
+    collision_robot_radius = 0.14
     proximity_activation_distance = 0.4  # m
     proximity_exponential_rate = 2.0
     proximity_front_fov_deg = 360.0

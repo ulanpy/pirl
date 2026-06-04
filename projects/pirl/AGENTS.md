@@ -1,7 +1,7 @@
 # Project Overview
 
 `pirl` is an Isaac Lab / Isaac Sim reinforcement-learning project for local obstacle avoidance with
-a tracked differential-drive robot in dynamic warehouse-like scenes. The project trains a SKRL
+a wheeled differential-drive robot in dynamic warehouse-like scenes. The project trains a SKRL
 PPO-RNN controller over LiDAR-derived local costmaps, path-following vector observations, and
 per-sector LiDAR hit positions, with an optional HJB-style critic regularizer that uses both the
 path-tracking error state and body-frame static-obstacle kinematics.
@@ -24,13 +24,13 @@ Isaac Sim code normally runs inside the Isaac container. Standard `python` may n
 ```bash
 ISAAC_PY="/isaac-sim/python.sh"
 $ISAAC_PY scripts/list_envs.py
-$ISAAC_PY scripts/skrl/play.py --task=<TASK_NAME> --checkpoint=<PATH_TO_CHECKPOINT>
+$ISAAC_PY scripts/skrl/play.py --task=burger --agent=skrl_ppo_aux_cfg_entry_point --checkpoint=<PATH_TO_CHECKPOINT>
 ```
 
 Long training jobs should only be launched when explicitly needed:
 
 ```bash
-$ISAAC_PY scripts/skrl/train.py --task=jettank
+$ISAAC_PY scripts/skrl/train.py --task=burger
 ```
 
 For remote visual debugging, training can use `--livestream 1` over WebRTC/Tailscale; on the simulation PC,

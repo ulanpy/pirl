@@ -42,9 +42,9 @@ def main() -> None:
         path_segment_len=12,
         reward_component_dim=6,
         hjb_lidar_sector_count=16,
-        lidar_horizontal_fov_range=(-100.0, 100.0),
+        lidar_horizontal_fov_range=(-180.0, 180.0),
         lidar_horizontal_res=1.0,
-        lidar_num_rays=201,
+        lidar_num_rays=360,
         lidar=SimpleNamespace(max_distance=18.0),
     )
     expected_vec_dim = (

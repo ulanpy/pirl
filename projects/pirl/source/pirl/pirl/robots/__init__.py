@@ -1,3 +1,3 @@
-from .jettank import JETTANK_CFG
+from .burger import BURGER_CFG
 
-__all__ = ["JETTANK_CFG"]
+__all__ = ["BURGER_CFG"]

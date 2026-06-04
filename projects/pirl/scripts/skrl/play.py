@@ -30,15 +30,15 @@ parser.add_argument("--video_length", type=int, default=200, help="Length of the
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
-parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
+parser.add_argument("--task", type=str, default="burger", help="Name of the task.")
 parser.add_argument(
     "--agent",
     type=str,
-    default=None,
+    default="skrl_ppo_aux_cfg_entry_point",
     help=(
-        "Name of the RL agent configuration entry point. Defaults to None, in which case the argument "
-        "--algorithm is used to determine the default agent configuration entry point."
+        "RL agent configuration entry point. Must match the config used during training "
+        "(burger checkpoints are trained with skrl_ppo_aux_cfg_entry_point)."
     ),
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")

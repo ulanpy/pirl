@@ -194,13 +194,13 @@ If the path ends before all 12 samples, repeat/clamp to the final path point.
 
 ### 28-59: LiDAR Sector Hits
 
-`K = 16` равных секторов покрывают весь lidar FOV (sim уровень: -100° .. +100°). На каждом
+`K = 16` равных секторов покрывают весь lidar FOV (sim уровень: -180° .. +180°). На каждом
 тике для каждого сектора выбирается ближайший hit и его положение записывается в `base_link`:
 
 ```text
 window_size = 16
 format = [x0, y0, x1, y1, ..., x15, y15]
-spacing = full_fov / K   # in sim it is 200° / 16 = 12.5° per sector
+spacing = full_fov / K   # in sim it is 360° / 16 = 22.5° per sector
 ```
 
 Algorithm на ROS2 стороне (исходные данные из `sensor_msgs/LaserScan`):
@@ -222,7 +222,7 @@ Algorithm на ROS2 стороне (исходные данные из `sensor_m
 `base_link`, перевычислить bearing и (x,y) с учётом этого offset.
 
 Sim генерирует hits в sensor frame, который для текущей конфигурации совпадает с
-`base_link` (см. `pirl_env_cfg.lidar.prim_path = ".../lidar_link"` и `OffsetCfg(0,0,0)`),
+`base_scan` (см. `pirl_env_cfg.lidar.prim_path = ".../base_scan"` и `OffsetCfg(0,0,0)`),
 поэтому контракт это body frame. На реальном роботе придерживайтесь того же frame.
 
 ### 60-61: Previous Action

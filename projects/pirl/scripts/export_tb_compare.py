@@ -8,8 +8,8 @@ Outputs:
 
 Usage:
 /isaac-sim/python.sh scripts/export_tb_compare.py \
-  --run-a "logs/skrl/jettank_direct/<run_a>" \
-  --run-b "logs/skrl/jettank_direct/<run_b>" \
+  --run-a "logs/skrl/burger_direct/<run_a>" \
+  --run-b "logs/skrl/burger_direct/<run_b>" \
   --label-a "<label_a>" \
   --label-b "<label_b>" \
   --out "outputs/tb-compare-<name>"

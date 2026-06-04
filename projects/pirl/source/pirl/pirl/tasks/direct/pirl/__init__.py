@@ -13,7 +13,7 @@ from . import agents
 
 
 gym.register(
-    id="jettank",
+    id="burger",
     entry_point=f"{__name__}.pirl_env:PirlEnv",
     disable_env_checker=True,
     kwargs={
