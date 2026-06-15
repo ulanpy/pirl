@@ -59,6 +59,7 @@ parser.add_argument(
 )
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
+parser.set_defaults(headless=True)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
 # Ensure animation schema extensions are loaded by Kit at startup time.

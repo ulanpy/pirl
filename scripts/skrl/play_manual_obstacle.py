@@ -71,8 +71,8 @@ parser.add_argument("--manual_env_id", type=int, default=0, help="Environment id
 parser.add_argument("--manual_slot_id", type=int, default=0, help="Obstacle slot id to control.")
 parser.add_argument("--manual_speed", type=float, default=0.75, help="Manual XY speed in m/s.")
 parser.add_argument("--manual_yaw_speed", type=float, default=1.5, help="Manual yaw speed in rad/s.")
-
 AppLauncher.add_app_launcher_args(parser)
+parser.set_defaults(headless=True)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -274,9 +274,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     runner = get_runner(env, experiment_cfg, args_cli.ml_framework)
     print(f"[INFO] Loading model checkpoint from: {resume_path}")
     runner.agent.load(resume_path)
-    runner.agent.set_running_mode("eval")
+    runner.agent.enable_training_mode(False, apply_to_models=True)
 
     obs, _ = env.reset()
+    states = env.state()
 
     # Initialize manual obstacle pose from current slot state.
     with torch.no_grad():
@@ -313,12 +314,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
             dyn.set_manual_obstacle_pose(env_id=env_id, slot_id=slot_id, local_xy=manual_xy, yaw=manual_yaw)
 
             with torch.inference_mode():
-                outputs = runner.agent.act(obs, timestep=0, timesteps=0)
+                outputs = runner.agent.act(obs, states, timestep=0, timesteps=0)
                 if hasattr(env, "possible_agents"):
                     actions = {a: outputs[-1][a].get("mean_actions", outputs[0][a]) for a in env.possible_agents}
                 else:
                     actions = outputs[-1].get("mean_actions", outputs[0])
                 obs, _, _, _, _ = env.step(actions)
+                states = env.state()
 
             if args_cli.video:
                 timestep += 1

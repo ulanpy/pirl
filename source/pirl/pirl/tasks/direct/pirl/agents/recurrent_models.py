@@ -167,6 +167,7 @@ class RecurrentGaussianPolicy(GaussianMixin, Model):
         observation_space,
         action_space,
         device,
+        state_space=None,
         num_envs: int = 1,
         sequence_length: int = 32,
         gru_hidden_size: int = 128,
@@ -180,7 +181,13 @@ class RecurrentGaussianPolicy(GaussianMixin, Model):
         return_source: bool = False,
         **kwargs,
     ) -> None:
-        Model.__init__(self, observation_space, action_space, device)
+        Model.__init__(
+            self,
+            observation_space=observation_space,
+            state_space=state_space,
+            action_space=action_space,
+            device=device,
+        )
         GaussianMixin.__init__(
             self,
             clip_actions=clip_actions,
@@ -235,7 +242,7 @@ class RecurrentGaussianPolicy(GaussianMixin, Model):
             costmap_shape=self._costmap_shape,
         )
         mean = self.mean_head(feats)
-        return mean, self.log_std_parameter, {"rnn": [rnn_next]}
+        return mean, {"log_std": self.log_std_parameter, "rnn": [rnn_next]}
 
 
 class FeedForwardDeterministicValue(DeterministicMixin, Model):
@@ -246,11 +253,18 @@ class FeedForwardDeterministicValue(DeterministicMixin, Model):
         observation_space,
         action_space,
         device,
+        state_space=None,
         clip_actions: bool = False,
         return_source: bool = False,
         **kwargs,
     ) -> None:
-        Model.__init__(self, observation_space, action_space, device)
+        Model.__init__(
+            self,
+            observation_space=observation_space,
+            state_space=state_space,
+            action_space=action_space,
+            device=device,
+        )
         DeterministicMixin.__init__(self, clip_actions=clip_actions)
         self._vec_start, self._vec_dim, self._costmap_start, self._costmap_shape = get_vec_costmap_layout(
             observation_space
