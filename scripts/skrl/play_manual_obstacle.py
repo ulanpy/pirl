@@ -110,7 +110,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import pirl.tasks  # noqa: F401
 from pirl.tasks.direct.pirl.agents.runner_utils import get_runner
 
-SKRL_VERSION = "1.4.3"
+SKRL_VERSION = "2.1.0"
 if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
     skrl.logger.error(
         f"Unsupported skrl version: {skrl.__version__}. Install skrl>={SKRL_VERSION}."

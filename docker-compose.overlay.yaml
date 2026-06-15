@@ -2,4 +2,4 @@ services:
   isaac-lab-base: # Имя сервиса должно совпадать с тем, что в оригинальном файле Isaac Lab
     volumes:
       # Монтируем твою папку с хоста в контейнер
-      - .:/workspace/pirl
+      - ${PIRL_PROJECT_DIR}:/workspace/pirl

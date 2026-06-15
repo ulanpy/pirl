@@ -1,8 +1,25 @@
 import copy
 from typing import Any, Mapping, Union, cast
 
-from skrl.utils.runner.torch import Runner
 from skrl.envs.wrappers.torch import MultiAgentEnvWrapper, Wrapper
+from skrl.utils.runner.torch import Runner
+
+
+def _migrate_agent_cfg(agent_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Apply skrl 2.x YAML field renames for custom agent construction."""
+    agent_cfg = copy.deepcopy(agent_cfg)
+    if "lambda" in agent_cfg:
+        agent_cfg.setdefault("gae_lambda", agent_cfg.pop("lambda"))
+    if "clip_predicted_values" in agent_cfg:
+        agent_cfg.pop("clip_predicted_values")
+    if "rewards_shaper_scale" in agent_cfg:
+        agent_cfg.pop("rewards_shaper_scale")
+    if "observation_preprocessor" not in agent_cfg and "state_preprocessor" in agent_cfg:
+        agent_cfg["observation_preprocessor"] = agent_cfg.pop("state_preprocessor")
+        if "state_preprocessor_kwargs" in agent_cfg:
+            agent_cfg["observation_preprocessor_kwargs"] = agent_cfg.pop("state_preprocessor_kwargs")
+    return agent_cfg
+
 
 def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any], ml_framework: str) -> Runner:
     """Universal runner factory for any agent class."""
@@ -11,7 +28,6 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
             def _component(self, name: str):
                 lname = name.lower()
 
-                # Explicit custom component registry (hardcoded on purpose).
                 from .ppo_hjb_rnn import PPOHjbRNN, PPOHjbRNN_default_config
                 from .recurrent_models import (
                     FeedForwardDeterministicValue,
@@ -28,7 +44,6 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                 return super()._component(name)
 
             def _generate_models(self, env, cfg):
-                # Inject runtime num_envs into recurrent model specs so RNN states have correct shape.
                 models_cfg = cfg.get("models", {})
                 for role, role_cfg in models_cfg.items():
                     if not isinstance(role_cfg, dict):
@@ -45,13 +60,11 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
             def _generate_agent(self, env, cfg, models):
                 cfg = cast(dict[str, Any], copy.deepcopy(cfg))
                 agent_class_name = cfg.get("agent", {}).get("class", "")
-                
-                # Check if it's a standard skrl agent
+
                 standard_agents = ["a2c", "amp", "cem", "ddpg", "ddqn", "dqn", "ppo", "rpo", "sac", "td3", "trpo"]
                 if agent_class_name.lower() in standard_agents:
                     return super()._generate_agent(env, cfg, models)
 
-                # --- Generic initialization for custom agents ---
                 device = env.device
                 agent_id = "agent"
 
@@ -63,24 +76,31 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                     memory_cfg["memory_size"] = cfg["agent"]["rollouts"]
                 memory = memory_class(num_envs=env.num_envs, device=device, **self._process_cfg(memory_cfg))
 
-                # Build agent cfg from agent's explicit default config.
                 base_cfg = self._component(f"{agent_class_name.lower()}_default_config")
-                
-                agent_cfg = base_cfg.copy()
-                agent_cfg.update(self._process_cfg(cfg["agent"]))
-                agent_cfg.get("state_preprocessor_kwargs", {}).update({"size": env.observation_space, "device": device})
-                agent_cfg.get("value_preprocessor_kwargs", {}).update({"size": 1, "device": device})
+                agent_cfg = _migrate_agent_cfg(base_cfg.copy())
+                agent_cfg.update(_migrate_agent_cfg(self._process_cfg(cfg["agent"])))
+
+                obs_space = env.observation_space
+                state_space = getattr(env, "state_space", None)
+                agent_cfg.setdefault("observation_preprocessor_kwargs", {})
+                agent_cfg["observation_preprocessor_kwargs"].update({"size": obs_space, "device": device})
+                agent_cfg.setdefault("value_preprocessor_kwargs", {})
+                agent_cfg["value_preprocessor_kwargs"].update({"size": 1, "device": device})
+                if state_space is not None:
+                    agent_cfg.setdefault("state_preprocessor_kwargs", {})
+                    agent_cfg["state_preprocessor_kwargs"].update({"size": state_space, "device": device})
 
                 agent_class = self._component(agent_class_name)
                 return agent_class(
                     models=models[agent_id],
                     memory=memory,
-                    observation_space=env.observation_space,
+                    observation_space=obs_space,
+                    state_space=state_space,
                     action_space=env.action_space,
                     cfg=agent_cfg,
                     device=device,
                 )
 
         return UniversalRunner(env, cfg)
-    
+
     return Runner(env, cfg)

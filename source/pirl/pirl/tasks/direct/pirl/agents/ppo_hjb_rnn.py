@@ -1,6 +1,9 @@
-"""PPO-RNN agent with optional HJB PINN-style regularizer on the critic."""
+"""PPO-RNN agent with optional HJB PINN-style regularizer on the critic (skrl 2.x)."""
+
+from __future__ import annotations
 
 import copy
+import dataclasses
 import itertools
 import math
 from typing import Any, List, Mapping, NamedTuple, Optional, Tuple, Union
@@ -11,10 +14,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from skrl import config
-from skrl.agents.torch.ppo.ppo_rnn import PPO_DEFAULT_CONFIG, PPO_RNN
+from skrl.agents.torch.ppo.ppo_rnn import PPO_RNN, compute_gae
 from skrl.resources.schedulers.torch import KLAdaptiveLR
 
 from .obs_layout import get_vec_costmap_layout
+from .ppo_hjb_cfg import PPOHjbRNN_CFG
 
 
 class _MinibatchLosses(NamedTuple):
@@ -41,146 +45,115 @@ class _HjbResult(NamedTuple):
     lidar_grad_term_abs_mean: float
 
 
-# Merged into skrl PPO_DEFAULT_CONFIG; overridden by YAML ``agent:`` section.
+_PPOHJB_FIELD_NAMES = {f.name for f in dataclasses.fields(PPOHjbRNN_CFG)}
+
+
+def _build_agent_cfg(raw: Mapping[str, Any] | None) -> PPOHjbRNN_CFG:
+    """Merge YAML/dict overrides into ``PPOHjbRNN_CFG`` defaults."""
+    merged = dataclasses.asdict(PPOHjbRNN_CFG())
+    if raw:
+        merged.update({k: v for k, v in raw.items() if k in _PPOHJB_FIELD_NAMES})
+    cfg = PPOHjbRNN_CFG(**merged)
+    cfg.expand()
+    return cfg
+
+
+# Runner default-config hook (``ppohjbrnn_default_config``).
 PPOHjbRNN_default_config = {
-    # HJB regularizer (PINN-style) on value function. If 0.0, HJB branch is disabled.
-    "hjb_loss_scale": 0.5,
-    # Differential-drive kinematics scales for normalized actions.
-    "hjb_max_lin_vel": 0.5,
-    "hjb_max_ang_vel": 1.5,
-    # Running cost weights in Hamiltonian.
-    "hjb_time_weight": 0.5,
-    "hjb_distance_weight": 0.2,
-    "hjb_heading_weight": 0.2,
-    "hjb_control_weight": 0.05,
-    # Progress-consistent term in running cost (larger -> stronger forward preference).
-    "hjb_progress_weight": 1.0,
-    # Hamiltonian mode:
-    # - "policy": evaluate H(x, u_policy, grad V)
-    # - "optimal": evaluate H*(x, grad V) using analytic argmin dH/du = 0
-    "hjb_hamiltonian_mode": "optimal",
-    # Preferred indices in vec for HJB state [d, psi].
-    # ObservationSchemaV2.1 vec layout:
-    # [vx, wz, d_signed, heading_error, path_obs..., lidar_sector_xy..., prev_action, prev_reward]
-    "hjb_vec_d_index": 2,
-    "hjb_vec_psi_index": 3,
-    # Env step (seconds). Used to derive continuous-time discount rho = -ln(gamma)/dt
-    # for the reward-max HJB residual r + grad V . f - rho V. Default matches
-    # PirlEnvCfg: decimation=2 * sim.dt=1/120 => dt = 1/60 s.
-    "hjb_step_dt": 1.0 / 60.0,
-    # Optional LiDAR-sector hit positions used to extend HJB dynamics (Schema V2.1).
-    # When ``hjb_lidar_sector_count > 0``, HJB Hamiltonian is augmented with
-    # ``sum_k (dV/dx_k * x_dot_k + dV/dy_k * y_dot_k)`` for each sector hit at vec slot
-    # ``[hjb_lidar_hits_start_index : start + 2 * sector_count]``.
-    # Body-frame static-obstacle kinematics: x_dot = -v + w*y, y_dot = -w*x.
-    "hjb_lidar_hits_start_index": -1,
-    "hjb_lidar_sector_count": 0,
+    k: v
+    for k, v in dataclasses.asdict(PPOHjbRNN_CFG()).items()
+    if k not in {"experiment"}
 }
 
 
 class PPOHjbRNN(PPO_RNN):
-    """PPO-RNN (skrl) extended with an optional HJB-style critic penalty.
-
-    HJB branch (if ``hjb_loss_scale > 0``) penalizes a local Hamiltonian residual built
-    from selected ``vec`` indices and analytic relative kinematics; see
-    ``docs/HJB_THEORY_TIME_DISTANCE.md``.
-    """
+    """PPO-RNN (skrl 2.x) extended with an optional HJB-style critic penalty."""
 
     def __init__(
         self,
         models: Mapping[str, Any],
         memory: Optional[Any] = None,
         observation_space: Optional[Union[int, Tuple[int], gymnasium.Space]] = None,
+        state_space: Optional[Union[int, Tuple[int], gymnasium.Space]] = None,
         action_space: Optional[Union[int, Tuple[int], gymnasium.Space]] = None,
         device: Optional[Union[str, torch.device]] = None,
-        cfg: Optional[dict] = None,
+        cfg: PPOHjbRNN_CFG | Mapping[str, Any] | None = None,
     ) -> None:
-        """Merge defaults with ``PPOHjbRNN_default_config`` and ``cfg``."""
-        _cfg = copy.deepcopy(PPO_DEFAULT_CONFIG)
-        _cfg.update(PPOHjbRNN_default_config)
-        _cfg.update(cfg if cfg is not None else {})
+        if isinstance(cfg, PPOHjbRNN_CFG):
+            cfg_obj = copy.deepcopy(cfg)
+            cfg_obj.expand()
+        else:
+            cfg_obj = _build_agent_cfg(cfg if isinstance(cfg, Mapping) else None)
         super().__init__(
             models=models,
             memory=memory,
             observation_space=observation_space,
+            state_space=state_space,
             action_space=action_space,
             device=device,
-            cfg=_cfg,
+            cfg=cfg_obj,
         )
+        self.cfg: PPOHjbRNN_CFG
+        self._init_hjb_fields()
 
-        # HJB config
-        self._hjb_loss_scale = float(self.cfg.get("hjb_loss_scale", 0.0))
-        self._hjb_max_lin_vel = float(self.cfg.get("hjb_max_lin_vel", 0.5))
-        self._hjb_max_ang_vel = float(self.cfg.get("hjb_max_ang_vel", 3.0))
-        self._hjb_time_weight = float(self.cfg.get("hjb_time_weight", 1.0))
-        self._hjb_distance_weight = float(self.cfg.get("hjb_distance_weight", 0.2))
-        self._hjb_heading_weight = float(self.cfg.get("hjb_heading_weight", 0.2))
-        self._hjb_control_weight = float(self.cfg.get("hjb_control_weight", 0.05))
-        self._hjb_progress_weight = float(self.cfg.get("hjb_progress_weight", 1.0))
-        self._hjb_hamiltonian_mode = str(self.cfg.get("hjb_hamiltonian_mode", "optimal")).strip().lower()
+    def _init_hjb_fields(self) -> None:
+        """Load HJB hyperparameters from the extended agent config."""
+        self._hjb_loss_scale = float(self.cfg.hjb_loss_scale)
+        self._hjb_max_lin_vel = float(self.cfg.hjb_max_lin_vel)
+        self._hjb_max_ang_vel = float(self.cfg.hjb_max_ang_vel)
+        self._hjb_time_weight = float(self.cfg.hjb_time_weight)
+        self._hjb_distance_weight = float(self.cfg.hjb_distance_weight)
+        self._hjb_heading_weight = float(self.cfg.hjb_heading_weight)
+        self._hjb_control_weight = float(self.cfg.hjb_control_weight)
+        self._hjb_progress_weight = float(self.cfg.hjb_progress_weight)
+        self._hjb_hamiltonian_mode = str(self.cfg.hjb_hamiltonian_mode).strip().lower()
         if self._hjb_hamiltonian_mode not in ("policy", "optimal"):
             raise ValueError(
                 "hjb_hamiltonian_mode must be one of {'policy', 'optimal'}, "
                 f"got: {self._hjb_hamiltonian_mode}"
             )
-        self._hjb_vec_d_index = int(self.cfg.get("hjb_vec_d_index", 2))
-        self._hjb_vec_psi_index = int(self.cfg.get("hjb_vec_psi_index", 3))
-        self._hjb_lidar_start = int(self.cfg.get("hjb_lidar_hits_start_index", -1))
-        self._hjb_lidar_K = int(self.cfg.get("hjb_lidar_sector_count", 0))
+        self._hjb_vec_d_index = int(self.cfg.hjb_vec_d_index)
+        self._hjb_vec_psi_index = int(self.cfg.hjb_vec_psi_index)
+        self._hjb_lidar_start = int(self.cfg.hjb_lidar_hits_start_index)
+        self._hjb_lidar_K = int(self.cfg.hjb_lidar_sector_count)
         if self._hjb_lidar_K > 0 and self._hjb_lidar_start < 0:
             raise ValueError(
                 "hjb_lidar_sector_count > 0 requires a non-negative hjb_lidar_hits_start_index."
             )
-        # Continuous-time discount rate matched to PPO's per-step discount.
-        # PPO learns V(x) = E[sum gamma^t r_t]; the reward-max HJB Bellman at stationarity
-        # is  r + grad V . f - rho V = 0  with rho = -ln(gamma)/dt. Without the rho V term
-        # the residual is offset by rho*V at the optimum and scales with value magnitude,
-        # causing HJB loss to explode as V grows during training.
-        self._hjb_step_dt = float(self.cfg.get("hjb_step_dt", 1.0 / 60.0))
-        _gamma = float(getattr(self, "_discount_factor", 0.99))
+        self._hjb_step_dt = float(self.cfg.hjb_step_dt)
+        _gamma = float(self.cfg.discount_factor)
         self._hjb_discount_rate = (
             -math.log(max(min(_gamma, 1.0 - 1e-9), 1e-9)) / max(self._hjb_step_dt, 1e-9)
         )
-
-        # Vec slice in flattened Dict(obs); same layout as recurrent_models / skrl preprocessor.
         self._vec_start, self._vec_size, _, _ = get_vec_costmap_layout(self.observation_space)
         self._vec_end = self._vec_start + self._vec_size
 
     @staticmethod
-    def _compute_gae(
-        rewards: torch.Tensor,
-        dones: torch.Tensor,
-        values: torch.Tensor,
-        bootstrap_values: torch.Tensor,
-        discount_factor: float,
-        lambda_coefficient: float,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """TD(λ) advantages and returns over the rollout buffer; last step bootstrapped with ``bootstrap_values``."""
-        advantage = 0
-        advantages = torch.zeros_like(rewards)
-        not_dones = dones.logical_not()
-        memory_size = rewards.shape[0]
-        for i in reversed(range(memory_size)):
-            next_v = values[i + 1] if i < memory_size - 1 else bootstrap_values
-            advantage = (
-                rewards[i]
-                - values[i]
-                + discount_factor * not_dones[i] * (next_v + lambda_coefficient * advantage)
-            )
-            advantages[i] = advantage
-        returns = advantages + values
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        return returns, advantages
+    def _preprocessed_inputs(
+        agent: PPOHjbRNN,
+        observations: torch.Tensor,
+        states: torch.Tensor,
+        *,
+        train: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "observations": agent._observation_preprocessor(observations, train=train),
+            "states": agent._state_preprocessor(states, train=train),
+        }
 
     def _bootstrap_last_values(self) -> torch.Tensor:
-        """Evaluate critic on stored ``_current_next_states`` (inverse value preprocessor on output)."""
-        with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-            self.value.train(False)
-            rnn = {"rnn": self._rnn_initial_states["value"]} if self._rnn else {}
-            last_values, _, _ = self.value.act(
-                {"states": self._state_preprocessor(self._current_next_states.float()), **rnn}, role="value"
+        """Evaluate critic on stored next observations (inverse value preprocessor on output)."""
+        with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self.cfg.mixed_precision):
+            self.value.enable_training_mode(False)
+            inputs = self._preprocessed_inputs(
+                self,
+                self._current_next_observations.float(),
+                self._current_next_states.float() if self._current_next_states is not None else self._current_next_observations.float(),
             )
-            self.value.train(True)
+            if self._rnn:
+                inputs["rnn"] = self._rnn_initial_states["value"]
+            last_values, _ = self.value.act(inputs, role="value")
+            self.value.enable_training_mode(True)
             return self._value_preprocessor(last_values, inverse=True)
 
     def _rnn_kwargs_for_minibatch(
@@ -190,14 +163,14 @@ class PPOHjbRNN(PPO_RNN):
         terminated: torch.Tensor,
         truncated: torch.Tensor,
     ) -> Tuple[dict, dict]:
-        """Build ``rnn`` / ``terminated`` kwargs for policy and value for one training minibatch."""
+        """Build ``rnn`` kwargs for policy and value for one training minibatch."""
         if not self._rnn:
             return {}, {}
-        done = terminated | truncated
         if self.policy is self.value:
             rnn_policy = {
                 "rnn": [s.transpose(0, 1) for s in sampled_rnn_batches[batch_index]],
-                "terminated": done,
+                "terminated": terminated,
+                "truncated": truncated,
             }
             return rnn_policy, rnn_policy
         rnn_policy = {
@@ -206,7 +179,8 @@ class PPOHjbRNN(PPO_RNN):
                 for s, n in zip(sampled_rnn_batches[batch_index], self._rnn_tensors_names)
                 if "policy" in n
             ],
-            "terminated": done,
+            "terminated": terminated,
+            "truncated": truncated,
         }
         rnn_value = {
             "rnn": [
@@ -214,28 +188,18 @@ class PPOHjbRNN(PPO_RNN):
                 for s, n in zip(sampled_rnn_batches[batch_index], self._rnn_tensors_names)
                 if "value" in n
             ],
-            "terminated": done,
+            "terminated": terminated,
+            "truncated": truncated,
         }
         return rnn_policy, rnn_value
 
     def _hjb_loss(
         self,
-        sampled_states_raw: torch.Tensor,
+        sampled_observations_raw: torch.Tensor,
         sampled_actions: torch.Tensor,
         sampled_terminated: torch.Tensor,
     ) -> _HjbResult:
-        """Scaled mean-squared reward-max HJB residual on the critic (FP32); zero if disabled.
-
-        Convention: PPO learns a reward-maximization value ``V_pi(x) = E[sum gamma^t r_t]``
-        with reward ``r = -l`` (negation of the running cost ``l`` modeled below). The
-        matching continuous-time Bellman stationarity is
-
-            r(x, u*) + grad_x V(x) . f(x, u*) - rho V(x) = 0,    rho = -ln(gamma)/dt,
-
-        so we minimize the squared residual of this identity. Using reward-max (rather
-        than the cost-min form) ensures HJB gradients do not fight PPO's TD targets:
-        both drive V in the same direction as policy improves.
-        """
+        """Scaled mean-squared reward-max HJB residual on the critic (FP32); zero if disabled."""
         if self._hjb_loss_scale <= 0.0:
             return _HjbResult(
                 loss=torch.tensor(0.0, device=self.device),
@@ -247,25 +211,22 @@ class PPOHjbRNN(PPO_RNN):
         if self._hjb_vec_d_index < 0 or self._hjb_vec_psi_index < 0:
             raise ValueError("hjb_vec_d_index and hjb_vec_psi_index must be non-negative.")
         with torch.autocast(device_type=self._device_type, enabled=False):
-            # получение физических значений состояний из сырых наблюдений без нормализации
-            hjb_states_raw = sampled_states_raw.detach().clone().float().requires_grad_(True)
-            hjb_states = self._state_preprocessor(hjb_states_raw, train=False)
-            hjb_rnn_value: dict = {}
+            hjb_obs_raw = sampled_observations_raw.detach().clone().float().requires_grad_(True)
+            hjb_states = self._observation_preprocessor(hjb_obs_raw, train=False)
+            hjb_inputs: dict[str, Any] = {
+                "observations": hjb_states,
+                "states": self._state_preprocessor(hjb_obs_raw, train=False),
+            }
             if self._rnn:
-                hjb_rnn_value = {
-                    "rnn": self._rnn_initial_states["value"],
-                    "terminated": torch.zeros_like(sampled_terminated, dtype=torch.bool),
-                }
-            hjb_values, _, _ = self.value.act({"states": hjb_states, **hjb_rnn_value}, role="value")
-            # Map V back to physical reward units so rho * V is on the same scale as the
-            # reward-rate running cost. The value preprocessor is a running standardizer
-            # (RunningStandardScaler) applied to TD targets, so `value.act` returns
-            # normalized V; the inverse pass restores mean/std-adjusted absolute V.
+                hjb_inputs["rnn"] = self._rnn_initial_states["value"]
+                hjb_inputs["terminated"] = torch.zeros_like(sampled_terminated, dtype=torch.bool)
+                hjb_inputs["truncated"] = torch.zeros_like(sampled_terminated, dtype=torch.bool)
+            hjb_values, _ = self.value.act(hjb_inputs, role="value")
             if self._value_preprocessor is not None:
                 hjb_values_phys = self._value_preprocessor(hjb_values, inverse=True)
             else:
                 hjb_values_phys = hjb_values
-            hjb_vec_raw = hjb_states_raw[:, self._vec_start : self._vec_end]
+            hjb_vec_raw = hjb_obs_raw[:, self._vec_start : self._vec_end]
             grad_vec_full = torch.autograd.grad(
                 hjb_values.sum(),
                 hjb_vec_raw,
@@ -285,7 +246,6 @@ class PPOHjbRNN(PPO_RNN):
                     f"d_idx={self._hjb_vec_d_index}, psi_idx={self._hjb_vec_psi_index}, "
                     f"lidar_start={self._hjb_lidar_start}, lidar_K={self._hjb_lidar_K}"
                 )
-            # HJB state: x = [d, psi] (signed cross-track error, heading error).
             d_err = vec[:, self._hjb_vec_d_index : self._hjb_vec_d_index + 1]
             psi_err = vec[:, self._hjb_vec_psi_index : self._hjb_vec_psi_index + 1]
             dVdd = grad_vec[:, self._hjb_vec_d_index : self._hjb_vec_d_index + 1]
@@ -296,32 +256,17 @@ class PPOHjbRNN(PPO_RNN):
                 dtype=torch.float32,
             ).clamp(min=1e-6)
             if self._hjb_hamiltonian_mode == "optimal":
-                # Reward-max argmax of H_r = -l + grad V . f solved from dH_r/du = 0:
-                #   dH_r/dv = -(2 w_u v - w_p cos psi) + dV/dd sin psi = 0
-                #     => v* = (w_p cos psi + dV/dd sin psi) / (2 w_u)
-                #   dH_r/dw = -(0.2 w_u w)              + dV/dpsi     = 0
-                #     => w* =  dV/dpsi / (0.2 w_u)
                 v_ctrl = (
                     self._hjb_progress_weight * torch.cos(psi_err) + dVdd * torch.sin(psi_err)
                 ) / (2.0 * control_w_t)
                 w_ctrl = dVdpsi / (0.2 * control_w_t)
             else:
-                # Policy-evaluated Hamiltonian (on-policy residual).
-                # PPO stores raw Gaussian samples in memory, but the env clamps them to
-                # [-1, 1] before applying to wheels (see PirlEnv._pre_physics_step). Match
-                # the realized physical control here so HJB residual reflects what the
-                # robot actually executed instead of unbounded policy tails.
                 clamped_actions = torch.clamp(sampled_actions[:, 0:2].float(), min=-1.0, max=1.0)
                 v_ctrl = clamped_actions[:, 0:1] * self._hjb_max_lin_vel
                 w_ctrl = clamped_actions[:, 1:2] * self._hjb_max_ang_vel
 
-            # Small-curvature local kinematics: d_dot = v sin psi, psi_dot = w.
             d_dot = v_ctrl * torch.sin(psi_err)
             psi_dot = w_ctrl
-            # Optional Schema V2.1 extension: per-sector LiDAR hit positions in body frame
-            # are slotted into vec at [start, start + 2K). For a static obstacle expressed
-            # in the robot body frame:  x_dot_k = -v + w * y_k,  y_dot_k = -w * x_k.
-            # Their contribution to grad V . f is sum_k (dV/dx_k * x_dot_k + dV/dy_k * y_dot_k).
             lidar_grad_term = torch.zeros_like(d_err)
             if self._hjb_lidar_K > 0:
                 start = self._hjb_lidar_start
@@ -334,11 +279,7 @@ class PPOHjbRNN(PPO_RNN):
                 dV_dy = grad_lidar[:, :, 1]
                 x_dot_k = -v_ctrl + w_ctrl * y_k
                 y_dot_k = -w_ctrl * x_k
-                # Mean over sectors keeps HJB scale approximately K-invariant
-                # (avoids over-conservative behavior when sector_count grows).
                 lidar_grad_term = (dV_dx * x_dot_k + dV_dy * y_dot_k).mean(dim=1, keepdim=True)
-            # Running cost model (acts as a physics-informed prior on V shape):
-            # l = w_t + w_d d^2 + w_psi (1 - cos psi) + w_u (v^2 + 0.1 w^2) - w_p v cos psi.
             control_cost = v_ctrl * v_ctrl + 0.1 * (w_ctrl * w_ctrl)
             running_cost = (
                 self._hjb_time_weight
@@ -347,9 +288,6 @@ class PPOHjbRNN(PPO_RNN):
                 + control_w_t * control_cost
                 - self._hjb_progress_weight * (v_ctrl * torch.cos(psi_err))
             )
-            # Reward-max continuous-time Bellman residual: r + grad V . f - rho V
-            # with r = -l. rho V anchors the residual to zero at the optimum; without
-            # it the residual is offset by rho*V and blows up as |V| grows.
             hamiltonian = (
                 -running_cost
                 + dVdd * d_dot
@@ -370,6 +308,7 @@ class PPOHjbRNN(PPO_RNN):
     def _minibatch_losses(
         self,
         epoch: int,
+        sampled_observations_raw: torch.Tensor,
         sampled_states_raw: torch.Tensor,
         sampled_actions: torch.Tensor,
         sampled_terminated: torch.Tensor,
@@ -382,36 +321,44 @@ class PPOHjbRNN(PPO_RNN):
         rnn_value: dict,
     ) -> _MinibatchLosses:
         """Forward PPO policy/value and HJB; return losses and KL for one minibatch."""
-        with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-            sampled_states = self._state_preprocessor(sampled_states_raw, train=not epoch)
-            _, next_log_prob, _ = self.policy.act(
-                {"states": sampled_states, "taken_actions": sampled_actions, **rnn_policy}, role="policy"
+        with torch.autocast(device_type=self._device_type, enabled=self.cfg.mixed_precision):
+            inputs = self._preprocessed_inputs(
+                self,
+                sampled_observations_raw,
+                sampled_states_raw,
+                train=not epoch,
             )
+            _, outputs = self.policy.act(
+                {**inputs, "taken_actions": sampled_actions, **rnn_policy}, role="policy"
+            )
+            next_log_prob = outputs["log_prob"]
 
             with torch.no_grad():
                 ratio_kl = next_log_prob - sampled_log_prob
                 kl_divergence = ((torch.exp(ratio_kl) - 1) - ratio_kl).mean()
 
-            if self._entropy_loss_scale:
-                entropy_loss = -self._entropy_loss_scale * self.policy.get_entropy(role="policy").mean()
+            if self.cfg.entropy_loss_scale:
+                entropy_loss = -self.cfg.entropy_loss_scale * self.policy.get_entropy(role="policy").mean()
             else:
                 entropy_loss = torch.tensor(0.0, device=self.device)
 
             ratio = torch.exp(next_log_prob - sampled_log_prob)
             surrogate = sampled_advantages * ratio
             surrogate_clipped = sampled_advantages * torch.clip(
-                ratio, 1.0 - self._ratio_clip, 1.0 + self._ratio_clip
+                ratio, 1.0 - self.cfg.ratio_clip, 1.0 + self.cfg.ratio_clip
             )
             policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
 
-            predicted_values, _, _ = self.value.act({"states": sampled_states, **rnn_value}, role="value")
-            if self._clip_predicted_values:
+            predicted_values, _ = self.value.act({**inputs, **rnn_value}, role="value")
+            if self.cfg.value_clip > 0:
                 predicted_values = sampled_values + torch.clip(
-                    predicted_values - sampled_values, min=-self._value_clip, max=self._value_clip
+                    predicted_values - sampled_values,
+                    min=-self.cfg.value_clip,
+                    max=self.cfg.value_clip,
                 )
-            value_loss = self._value_loss_scale * F.mse_loss(sampled_returns, predicted_values)
+            value_loss = self.cfg.value_loss_scale * F.mse_loss(sampled_returns, predicted_values)
 
-            hjb = self._hjb_loss(sampled_states_raw, sampled_actions, sampled_terminated)
+            hjb = self._hjb_loss(sampled_observations_raw, sampled_actions, sampled_terminated)
 
         return _MinibatchLosses(
             policy_loss=policy_loss,
@@ -426,7 +373,7 @@ class PPOHjbRNN(PPO_RNN):
         )
 
     def _optimizer_step(self, total_loss: torch.Tensor) -> None:
-        """``backward`` on combined losses, distributed grad sync, optional clip, ``optimizer.step``."""
+        """Backward on combined losses, distributed grad sync, optional clip, optimizer step."""
         self.optimizer.zero_grad()
         self.scaler.scale(total_loss).backward()
 
@@ -435,20 +382,20 @@ class PPOHjbRNN(PPO_RNN):
             if self.policy is not self.value:
                 self.value.reduce_parameters()
 
-        if self._grad_norm_clip > 0:
+        if self.cfg.grad_norm_clip > 0:
             self.scaler.unscale_(self.optimizer)
             if self.policy is self.value:
                 params = self.policy.parameters()
             else:
                 params = itertools.chain(self.policy.parameters(), self.value.parameters())
-            nn.utils.clip_grad_norm_(params, self._grad_norm_clip)
+            nn.utils.clip_grad_norm_(params, self.cfg.grad_norm_clip)
 
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
     def _schedule_learning_rate(self, kl_divergences: List[torch.Tensor]) -> None:
         """Step LR scheduler once per epoch (KL-adaptive uses mean KL over minibatches)."""
-        if not self._learning_rate_scheduler:
+        if self.scheduler is None:
             return
         if isinstance(self.scheduler, KLAdaptiveLR):
             kl = torch.tensor(kl_divergences, device=self.device).mean()
@@ -471,10 +418,10 @@ class PPOHjbRNN(PPO_RNN):
         cumulative_hjb_lidar_grad_term_abs_mean: float,
         denom: float,
     ) -> None:
-        """Write averaged losses and policy stats to experiment tracking (e.g. TensorBoard)."""
+        """Write averaged losses and policy stats to experiment tracking."""
         self.track_data("Loss / Policy loss", cumulative_policy_loss / denom)
         self.track_data("Loss / Value loss", cumulative_value_loss / denom)
-        if self._entropy_loss_scale:
+        if self.cfg.entropy_loss_scale:
             self.track_data("Loss / Entropy loss", cumulative_entropy_loss / denom)
         if self._hjb_loss_scale > 0.0:
             self.track_data("Loss / HJB loss", cumulative_hjb_loss / denom)
@@ -487,23 +434,20 @@ class PPOHjbRNN(PPO_RNN):
                     cumulative_hjb_lidar_grad_term_abs_mean / denom,
                 )
         self.track_data("Policy / Standard deviation", self.policy.distribution(role="policy").stddev.mean().item())
-        if self._learning_rate_scheduler:
+        if self.scheduler is not None:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
 
     def _update(self, timestep: int, timesteps: int) -> None:
-        """One PPO-RNN update: GAE, sequence minibatches, combined loss and optimizer steps.
-
-        ``timestep`` / ``timesteps`` are unused but kept for API compatibility with skrl ``Agent``.
-        """
+        """One PPO-RNN update with optional HJB critic regularizer."""
         last_values = self._bootstrap_last_values()
         values = self.memory.get_tensor_by_name("values")
-        returns, advantages = self._compute_gae(
+        returns, advantages = compute_gae(
             rewards=self.memory.get_tensor_by_name("rewards"),
-            dones=self.memory.get_tensor_by_name("terminated") | self.memory.get_tensor_by_name("truncated"),
+            terminated=self.memory.get_tensor_by_name("terminated"),
             values=values,
-            bootstrap_values=last_values,
-            discount_factor=self._discount_factor,
-            lambda_coefficient=self._lambda,
+            next_values=last_values,
+            discount_factor=self.cfg.discount_factor,
+            lambda_coefficient=self.cfg.gae_lambda,
         )
 
         self.memory.set_tensor_by_name("values", self._value_preprocessor(values, train=True))
@@ -511,24 +455,15 @@ class PPOHjbRNN(PPO_RNN):
         self.memory.set_tensor_by_name("advantages", advantages)
 
         sampled_batches = self.memory.sample_all(
-            names=[
-                "states",
-                "actions",
-                "terminated",
-                "truncated",
-                "log_prob",
-                "values",
-                "returns",
-                "advantages",
-            ],
-            mini_batches=self._mini_batches,
+            names=self._tensors_names,
+            mini_batches=self.cfg.mini_batches,
             sequence_length=self._rnn_sequence_length,
         )
         sampled_rnn_batches: List[List[torch.Tensor]] = []
         if self._rnn:
             sampled_rnn_batches = self.memory.sample_all(
                 names=self._rnn_tensors_names,
-                mini_batches=self._mini_batches,
+                mini_batches=self.cfg.mini_batches,
                 sequence_length=self._rnn_sequence_length,
             )
 
@@ -541,9 +476,10 @@ class PPOHjbRNN(PPO_RNN):
         cumulative_hjb_running_cost_mean = 0.0
         cumulative_hjb_lidar_grad_term_abs_mean = 0.0
 
-        for epoch in range(self._learning_epochs):
+        for epoch in range(self.cfg.learning_epochs):
             kl_divergences: List[torch.Tensor] = []
             for i, (
+                sampled_observations_raw,
                 sampled_states_raw,
                 sampled_actions,
                 sampled_terminated,
@@ -556,8 +492,9 @@ class PPOHjbRNN(PPO_RNN):
                 rnn_policy, rnn_value = self._rnn_kwargs_for_minibatch(
                     i, sampled_rnn_batches, sampled_terminated, sampled_truncated
                 )
-                L = self._minibatch_losses(
+                losses = self._minibatch_losses(
                     epoch,
+                    sampled_observations_raw,
                     sampled_states_raw,
                     sampled_actions,
                     sampled_terminated,
@@ -569,27 +506,27 @@ class PPOHjbRNN(PPO_RNN):
                     rnn_policy,
                     rnn_value,
                 )
-                kl_divergences.append(L.kl_divergence)
+                kl_divergences.append(losses.kl_divergence)
 
-                if self._kl_threshold and L.kl_divergence > self._kl_threshold:
+                if self.cfg.kl_threshold and losses.kl_divergence > self.cfg.kl_threshold:
                     break
 
-                total = L.policy_loss + L.entropy_loss + L.value_loss + L.hjb_loss
+                total = losses.policy_loss + losses.entropy_loss + losses.value_loss + losses.hjb_loss
                 self._optimizer_step(total)
 
-                cumulative_policy_loss += float(L.policy_loss.item())
-                cumulative_value_loss += float(L.value_loss.item())
-                cumulative_hjb_loss += float(L.hjb_loss.item())
-                cumulative_hjb_residual_abs_mean += L.hjb_residual_abs_mean
-                cumulative_hjb_value_abs_mean += L.hjb_value_abs_mean
-                cumulative_hjb_running_cost_mean += L.hjb_running_cost_mean
-                cumulative_hjb_lidar_grad_term_abs_mean += L.hjb_lidar_grad_term_abs_mean
-                if self._entropy_loss_scale:
-                    cumulative_entropy_loss += float(L.entropy_loss.item())
+                cumulative_policy_loss += float(losses.policy_loss.item())
+                cumulative_value_loss += float(losses.value_loss.item())
+                cumulative_hjb_loss += float(losses.hjb_loss.item())
+                cumulative_hjb_residual_abs_mean += losses.hjb_residual_abs_mean
+                cumulative_hjb_value_abs_mean += losses.hjb_value_abs_mean
+                cumulative_hjb_running_cost_mean += losses.hjb_running_cost_mean
+                cumulative_hjb_lidar_grad_term_abs_mean += losses.hjb_lidar_grad_term_abs_mean
+                if self.cfg.entropy_loss_scale:
+                    cumulative_entropy_loss += float(losses.entropy_loss.item())
 
             self._schedule_learning_rate(kl_divergences)
 
-        denom = float(self._learning_epochs * self._mini_batches)
+        denom = float(self.cfg.learning_epochs * self.cfg.mini_batches)
         self._track_update_metrics(
             cumulative_policy_loss,
             cumulative_value_loss,

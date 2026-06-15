@@ -11,6 +11,14 @@ from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
 from .obs_layout import get_vec_costmap_layout
 
 
+def _flat_tensor(inputs: Mapping[str, Any]) -> torch.Tensor:
+    """Preprocessed flat observation tensor (skrl 2.x uses ``observations``)."""
+    tensor = inputs.get("observations")
+    if tensor is None:
+        tensor = inputs["states"]
+    return tensor
+
+
 class _RecurrentBackbone(nn.Module):
     def __init__(
         self,
@@ -212,7 +220,7 @@ class RecurrentGaussianPolicy(GaussianMixin, Model):
         }
 
     def compute(self, inputs, role=""):
-        states = inputs["states"]
+        states = _flat_tensor(inputs)
         rnn_list = inputs.get("rnn", None)
         rnn_state = rnn_list[0] if rnn_list else None
         terminated = inputs.get("terminated", None)
@@ -281,7 +289,7 @@ class FeedForwardDeterministicValue(DeterministicMixin, Model):
         )
 
     def compute(self, inputs, role=""):
-        states = inputs["states"]
+        states = _flat_tensor(inputs)
         c, h, w = self._costmap_shape
         vec = states[:, self._vec_start : self._vec_start + self._vec_dim]
         costmap = states[:, self._costmap_start : self._costmap_start + (c * h * w)].reshape(-1, c, h, w)
