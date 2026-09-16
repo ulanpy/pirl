@@ -34,13 +34,18 @@
 
 ## Runtime Environment
 
-Isaac Sim code runs inside the Isaac Lab Docker container (`isaac-lab-base`). From the `pirl/` directory (sibling to `IsaacLab/`):
+Isaac Sim code runs inside the Isaac Lab Docker container (`isaac-lab-base`). PIRL pins Isaac Lab v2.3.2 as `third_party/IsaacLab`, which in turn pins Isaac Sim 5.1.0. From the `pirl/` directory:
 
 **Start (host):**
 
 ```bash
-PIRL_PROJECT_DIR=$(pwd) ../IsaacLab/docker/container.py start \
-  --files $(pwd)/docker-compose.overlay.yaml
+PIRL_PROJECT_DIR="$(pwd)" \
+docker compose \
+  --file third_party/IsaacLab/docker/docker-compose.yaml \
+  --file docker-compose.overlay.yaml \
+  --profile base \
+  --env-file third_party/IsaacLab/docker/.env.base \
+  up --detach --remove-orphans
 ```
 
 **Shell in (host):**
@@ -50,7 +55,7 @@ docker exec -it isaac-lab-base bash
 cd /workspace/pirl
 ```
 
-This mounts PIRL at `/workspace/pirl` and reuses the standard Isaac environment (X11, GPU, Omniverse cache).
+This headless Compose workflow mounts Isaac Lab at `/workspace/isaaclab` and PIRL at `/workspace/pirl`, reusing the standard GPU and Omniverse cache volumes. Do not add Isaac Lab's `x11.yaml`: PIRL uses WebRTC/livestream for remote visualization and does not require `$DISPLAY`.
 
 ### Training and Playback
 
@@ -80,7 +85,8 @@ Requires **skrl 2.1+** (bundled with Isaac Lab; pinned again in `source/pirl/set
 
 ### Container Philosophy
 
-- **No hardcoded paths** in code; `docker-compose.overlay.yaml` provides portability.
+- **Pinned runtime** — `third_party/IsaacLab` fixes the Isaac Lab / Isaac Sim contract; do not replace it with an arbitrary sibling checkout.
+- **No hardcoded paths** in code; `docker-compose.overlay.yaml` provides the PIRL mount without copying Isaac Lab's Docker stack.
 - **Zero-copy development** — edits on host are live in container (no image rebuild).
 - **AI workflows** should run inside the container. Host-side git, ruff, and pre-commit are preferred unless explicitly requested.
 
@@ -184,13 +190,13 @@ Use checks that fit the change. Smoke tests are optional: run them when they pro
 
 **Python not found in container** — use `docker exec -it isaac-lab-base bash`; inside the container `python` is Isaac Lab's interpreter (see `.bashrc` aliases).
 
-**Container not running** — `docker ps -a`, then re-run `container.py start` from `pirl/`.
+**Container not running** — `docker ps -a`, then re-run the direct `docker compose ... up --detach --remove-orphans` command from the Runtime Environment section.
 
 **Slow training / low GPU use** — check `nvidia-smi`, increase `--num_envs` if memory allows, try `--livestream 1` to rule out rendering bottlenecks.
 
 **Observation shape mismatch at playback** — checkpoint must match current `obs_layout.py` and `skrl_ppo_aux_cfg.yaml`; run `python scripts/check_observation_v2.py`.
 
-**Docker permission errors on logs** — `export DOCKER_UID=$(id -u) DOCKER_GID=$(id -g)` before `container.py start`, or set `UID`/`GID` in `docker-compose.overlay.yaml`.
+**Docker permission errors on logs** — set `DOCKER_UID=$(id -u)` and `DOCKER_GID=$(id -g)` in the environment before the Compose command, or set `UID`/`GID` in `docker-compose.overlay.yaml`.
 
 ## Key Files
 

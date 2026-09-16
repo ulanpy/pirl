@@ -10,7 +10,7 @@ Architecture, CLI options, ONNX export, configuration, validation, and troublesh
 
 ## Prerequisites
 
-Install [Isaac Lab](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html) with Docker support. Clone this repo as a **sibling** of `IsaacLab/` (the start command below assumes `../IsaacLab/`).
+PIRL pins [Isaac Lab v2.3.2](https://github.com/isaac-sim/IsaacLab/tree/v2.3.2) as a Git submodule. That release uses Isaac Sim 5.1.0. Docker Engine with Compose v2 and an NVIDIA GPU runtime are required.
 
 ---
 
@@ -19,20 +19,31 @@ Install [Isaac Lab](https://isaac-sim.github.io/IsaacLab/main/source/setup/insta
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/ulanpy/pirl.git
-cd pirl   # e.g. ~/pirl next to ~/IsaacLab
+git clone --recurse-submodules https://github.com/ulanpy/pirl.git
+cd pirl
+```
+
+For an existing clone:
+
+```bash
+git submodule update --init --recursive
 ```
 
 ### 2. Start the Container (host)
 
-From the `pirl/` directory:
+From the `pirl/` directory, start the pinned Isaac Lab Compose stack directly. This is deliberately headless: PIRL uses WebRTC/livestream when remote visualization is needed, so it does not require X11 or `$DISPLAY`.
 
 ```bash
-PIRL_PROJECT_DIR=$(pwd) ../IsaacLab/docker/container.py start \
-  --files $(pwd)/docker-compose.overlay.yaml
+PIRL_PROJECT_DIR="$(pwd)" \
+docker compose \
+  --file third_party/IsaacLab/docker/docker-compose.yaml \
+  --file docker-compose.overlay.yaml \
+  --profile base \
+  --env-file third_party/IsaacLab/docker/.env.base \
+  up --detach --remove-orphans
 ```
 
-First run builds the image; later starts are fast. Container name: `isaac-lab-base`. Project mount: `/workspace/pirl`.
+The first run pulls the pinned official image; later starts are fast. Container name: `isaac-lab-base`. Isaac Lab and PIRL are mounted separately at `/workspace/isaaclab` and `/workspace/pirl`.
 
 ### 3. Enter the Container (host)
 
@@ -46,7 +57,8 @@ cd /workspace/pirl
 Once per environment (Isaac Lab image already includes skrl 2.x; editable install also declares `skrl>=2.1.0`):
 
 ```bash
-python -m pip install -e source/pirlpython scripts/list_envs.py   # expect burger
+python -m pip install -e source/pirl
+python scripts/list_envs.py   # expect burger
 ```
 
 ### 5. Run a Trained Agent (Playback)
