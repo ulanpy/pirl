@@ -1,6 +1,8 @@
 # HJB Regularization for Current PIRL Setup
 
-This note documents the HJB term used in the current implementation.
+This note documents the HJB term used in the current implementation. The former
+LiDAR-sector state extension has been removed; LiDAR is still used by the costmap
+and environment safety rewards, but not by the HJB residual or `vec` observation.
 It is a **soft critic regularizer** for PPO (not a standalone optimal-control solver).
 
 ## 1) Scope and role
@@ -21,7 +23,7 @@ with path-tracking error dynamics.
 
 ## 2) HJB state and control in current residual
 
-When `hjb_lidar_sector_count = 0`, HJB state is reduced to:
+HJB state is:
 
 $$
 x = \begin{bmatrix} d \\ \psi \end{bmatrix}
@@ -31,17 +33,6 @@ where:
 
 - $d$: signed cross-track error (meters),
 - $\psi$: heading error to lookahead heading target (radians, wrapped to $[-\pi,\pi]$).
-
-When `hjb_lidar_sector_count = K > 0` (Schema V2.1, default), the state is extended with
-the body-frame positions of $K$ per-sector LiDAR hits:
-
-$$
-x = \begin{bmatrix} d \\ \psi \\ x_1 \\ y_1 \\ \vdots \\ x_K \\ y_K \end{bmatrix}
-$$
-
-These $(x_k, y_k)$ slots live in `vec` at
-`[hjb_lidar_hits_start_index : hjb_lidar_hits_start_index + 2K)` and are produced by
-`PirlEnv._compute_sector_lidar_hits` from the same LiDAR scan that builds the costmap.
 
 Control in the PDE residual is configurable by mode:
 
@@ -71,18 +62,6 @@ $$
 This is intentionally simple and stable for regularization.
 It matches the signed-error convention used by the environment.
 
-Static-obstacle kinematics in the robot body frame for each LiDAR sector hit
-$(x_k, y_k)$ (Schema V2.1):
-
-$$
-\dot x_k = -v + \omega\, y_k, \qquad \dot y_k = -\omega\, x_k.
-$$
-
-These are exact for an obstacle that is fixed in the world while the robot translates with
-forward speed $v$ and rotates at yaw rate $\omega$. They contribute the term
-$\sum_{k=1}^{K} \left(\dfrac{\partial V}{\partial x_k}\, \dot x_k + \dfrac{\partial V}{\partial y_k}\, \dot y_k\right)$
-to $\nabla V \cdot f$ in the Hamiltonian residual.
-
 ## 4) Hamiltonian residual (reward-max convention)
 
 PPO learns a reward-maximization value $V_\pi(x)=\mathbb E\left[\sum_t \gamma^t r_t\right]$,
@@ -100,19 +79,14 @@ At Bellman stationarity $\mathcal R_r(x,u^*)=0$, so squared-residual regularizat
 pulls $V$ toward a geometry consistent with the dynamics and the running-cost
 model — without flipping gradients against PPO's TD targets.
 
-Dynamics (Schema V2.1, $K$ sector LiDAR hits enabled):
+Dynamics:
 
 $$
 f(x,u)=
-\begin{bmatrix}\dot d\\\dot\psi\\\dot x_1\\\dot y_1\\\vdots\\\dot x_K\\\dot y_K\end{bmatrix}
+\begin{bmatrix}\dot d\\\dot\psi\end{bmatrix}
 =
-\begin{bmatrix}v\sin\psi\\\omega\\-v + \omega y_1\\-\omega x_1\\\vdots\\-v + \omega y_K\\-\omega x_K\end{bmatrix}
+\begin{bmatrix}v\sin\psi\\\omega\end{bmatrix}
 $$
-
-The running cost $\ell$ is unchanged from $K=0$: LiDAR sector states only enter HJB through
-$\nabla V \cdot f$ (no new cost weights). The intent is to let the critic align its geometry
-with body-frame obstacle motion while keeping the safety penalty itself in the env reward
-(`proximity` and `collision` terms in `_get_rewards`).
 
 Running cost (shape of the reward prior, used via $r=-\ell$):
 
@@ -155,36 +129,16 @@ $$
 
 ## 5) Input indices in current `vec`
 
-ObservationSchemaV2.1 `vec` layout (68 floats, see `pirl_env._build_vec_observation`):
+Current `vec` layout (36 floats, see `pirl_env._build_vec_observation`):
 
 $$
-[v_x,\, \omega_z,\, d,\, \psi,\, \text{path window} (24),\, \text{lidar sectors} (32),\, \text{prev action} (2),\, \text{prev reward} (6)]
+[v_x,\, \omega_z,\, d,\, \psi,\, \text{path window} (24),\, \text{prev action} (2),\, \text{prev reward} (6)]
 $$
 
 Therefore:
 
 - `hjb_vec_d_index = 2`
 - `hjb_vec_psi_index = 3`
-- `hjb_lidar_hits_start_index = 28`
-- `hjb_lidar_sector_count = 16`
-
-The maximizer formulas $v^*$ and $\omega^*$ in section 4 still come from
-$\partial \mathcal H_r / \partial u = 0$ but now include LiDAR sector states. With the
-running cost $\ell$ left unchanged and the new dynamics from section 3, the maximizers
-become:
-
-$$
-v^* = \frac{w_p\cos\psi + \dfrac{\partial V}{\partial d}\sin\psi - \displaystyle\sum_{k=1}^{K} \dfrac{\partial V}{\partial x_k}}{2 w_u},
-\qquad
-\omega^* = \frac{1}{0.2\, w_u}\left(\dfrac{\partial V}{\partial \psi} + \sum_{k=1}^{K}\!\left(\dfrac{\partial V}{\partial x_k}\, y_k - \dfrac{\partial V}{\partial y_k}\, x_k\right)\right).
-$$
-
-In the implementation we currently keep using the closed-form $u^*$ derived for $K=0$ to
-stay aligned with the existing residual: the LiDAR-sector contribution is applied
-additively to $\nabla V \cdot f$ but does not feed back into the analytical maximizer.
-This treats LiDAR-sector states as exogenous inputs to $V$ for the purpose of the
-optimal-mode residual; switching to the full $u^*$ above is a future improvement once we
-verify HJB stability on this state extension.
 
 ## 6) Raw vs normalized scale (important)
 
@@ -211,9 +165,6 @@ Main HJB config in `skrl_ppo_aux_cfg.yaml`:
 - `hjb_hamiltonian_mode` $\rightarrow$ choice of $u$ in Hamiltonian (`policy` or `optimal`)
 - `hjb_step_dt` $\rightarrow \Delta t$ used to derive $\rho=-\ln\gamma/\Delta t$
 - `hjb_max_lin_vel`, `hjb_max_ang_vel` are kept in config for backward compatibility.
-- `hjb_lidar_hits_start_index`, `hjb_lidar_sector_count` $\rightarrow$ Schema V2.1 LiDAR
-  state extension (must match `PirlEnvCfg.hjb_lidar_sector_count` and the slot order in
-  `PirlEnv._build_vec_observation`).
 
 The value used in the $\rho V$ term is the physical (unnormalized) critic output,
 obtained by inverse-applying the `RunningStandardScaler` value preprocessor so

@@ -30,22 +30,17 @@ flowchart TD
 
     subgraph hjbBranch [CBF-HJB Regularizer]
         H1["path state: d, psi"]
-        H2["nearest obstacle: x_o, y_o"]
         H3["grad V wrt d, psi"]
         H4["analytic path-HJB control"]
-        H5["CBF projection on v"]
         H6["Hamiltonian residual"]
         H7["HJB loss"]
     end
 
     L --> H1
-    L --> H2
     VOUT --> H3
     H1 --> H4
     H3 --> H4
-    H2 --> H5
-    H4 --> H5
-    H5 --> H6
+    H4 --> H6
     H1 --> H6
     H3 --> H6
     H6 --> H7

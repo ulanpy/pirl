@@ -23,5 +23,3 @@ class PPOHjbRNN_CFG(PPO_CFG):
     hjb_vec_d_index: int = 2
     hjb_vec_psi_index: int = 3
     hjb_step_dt: float = 1.0 / 60.0
-    hjb_lidar_hits_start_index: int = -1
-    hjb_lidar_sector_count: int = 0

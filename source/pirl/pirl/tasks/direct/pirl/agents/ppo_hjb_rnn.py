@@ -32,7 +32,6 @@ class _MinibatchLosses(NamedTuple):
     hjb_residual_abs_mean: float
     hjb_value_abs_mean: float
     hjb_running_cost_mean: float
-    hjb_lidar_grad_term_abs_mean: float
 
 
 class _HjbResult(NamedTuple):
@@ -42,7 +41,6 @@ class _HjbResult(NamedTuple):
     residual_abs_mean: float
     value_abs_mean: float
     running_cost_mean: float
-    lidar_grad_term_abs_mean: float
 
 
 _PPOHJB_FIELD_NAMES = {f.name for f in dataclasses.fields(PPOHjbRNN_CFG)}
@@ -114,12 +112,6 @@ class PPOHjbRNN(PPO_RNN):
             )
         self._hjb_vec_d_index = int(self.cfg.hjb_vec_d_index)
         self._hjb_vec_psi_index = int(self.cfg.hjb_vec_psi_index)
-        self._hjb_lidar_start = int(self.cfg.hjb_lidar_hits_start_index)
-        self._hjb_lidar_K = int(self.cfg.hjb_lidar_sector_count)
-        if self._hjb_lidar_K > 0 and self._hjb_lidar_start < 0:
-            raise ValueError(
-                "hjb_lidar_sector_count > 0 requires a non-negative hjb_lidar_hits_start_index."
-            )
         self._hjb_step_dt = float(self.cfg.hjb_step_dt)
         _gamma = float(self.cfg.discount_factor)
         self._hjb_discount_rate = (
@@ -206,7 +198,6 @@ class PPOHjbRNN(PPO_RNN):
                 residual_abs_mean=0.0,
                 value_abs_mean=0.0,
                 running_cost_mean=0.0,
-                lidar_grad_term_abs_mean=0.0,
             )
         if self._hjb_vec_d_index < 0 or self._hjb_vec_psi_index < 0:
             raise ValueError("hjb_vec_d_index and hjb_vec_psi_index must be non-negative.")
@@ -237,14 +228,11 @@ class PPOHjbRNN(PPO_RNN):
             grad_vec = torch.zeros_like(hjb_vec_raw) if grad_vec_full is None else grad_vec_full
             vec = hjb_vec_raw
             required_idx = max(self._hjb_vec_d_index, self._hjb_vec_psi_index)
-            if self._hjb_lidar_K > 0:
-                required_idx = max(required_idx, self._hjb_lidar_start + 2 * self._hjb_lidar_K - 1)
             if vec.shape[1] <= required_idx:
                 raise ValueError(
                     "HJB vec indices out of range for current vec layout: "
                     f"vec_dim={vec.shape[1]}, required_max_idx={required_idx}, "
-                    f"d_idx={self._hjb_vec_d_index}, psi_idx={self._hjb_vec_psi_index}, "
-                    f"lidar_start={self._hjb_lidar_start}, lidar_K={self._hjb_lidar_K}"
+                    f"d_idx={self._hjb_vec_d_index}, psi_idx={self._hjb_vec_psi_index}"
                 )
             d_err = vec[:, self._hjb_vec_d_index : self._hjb_vec_d_index + 1]
             psi_err = vec[:, self._hjb_vec_psi_index : self._hjb_vec_psi_index + 1]
@@ -267,19 +255,6 @@ class PPOHjbRNN(PPO_RNN):
 
             d_dot = v_ctrl * torch.sin(psi_err)
             psi_dot = w_ctrl
-            lidar_grad_term = torch.zeros_like(d_err)
-            if self._hjb_lidar_K > 0:
-                start = self._hjb_lidar_start
-                end = start + 2 * self._hjb_lidar_K
-                lidar_xy = vec[:, start:end].reshape(-1, self._hjb_lidar_K, 2)
-                grad_lidar = grad_vec[:, start:end].reshape(-1, self._hjb_lidar_K, 2)
-                x_k = lidar_xy[:, :, 0]
-                y_k = lidar_xy[:, :, 1]
-                dV_dx = grad_lidar[:, :, 0]
-                dV_dy = grad_lidar[:, :, 1]
-                x_dot_k = -v_ctrl + w_ctrl * y_k
-                y_dot_k = -w_ctrl * x_k
-                lidar_grad_term = (dV_dx * x_dot_k + dV_dy * y_dot_k).mean(dim=1, keepdim=True)
             control_cost = v_ctrl * v_ctrl + 0.1 * (w_ctrl * w_ctrl)
             running_cost = (
                 self._hjb_time_weight
@@ -292,7 +267,6 @@ class PPOHjbRNN(PPO_RNN):
                 -running_cost
                 + dVdd * d_dot
                 + dVdpsi * psi_dot
-                + lidar_grad_term
                 - self._hjb_discount_rate * hjb_values_phys
             )
             return _HjbResult(
@@ -300,9 +274,6 @@ class PPOHjbRNN(PPO_RNN):
                 residual_abs_mean=float(torch.mean(torch.abs(hamiltonian)).detach().item()),
                 value_abs_mean=float(torch.mean(torch.abs(hjb_values_phys)).detach().item()),
                 running_cost_mean=float(torch.mean(running_cost).detach().item()),
-                lidar_grad_term_abs_mean=float(
-                    torch.mean(torch.abs(lidar_grad_term)).detach().item()
-                ),
             )
 
     def _minibatch_losses(
@@ -369,7 +340,6 @@ class PPOHjbRNN(PPO_RNN):
             hjb_residual_abs_mean=hjb.residual_abs_mean,
             hjb_value_abs_mean=hjb.value_abs_mean,
             hjb_running_cost_mean=hjb.running_cost_mean,
-            hjb_lidar_grad_term_abs_mean=hjb.lidar_grad_term_abs_mean,
         )
 
     def _optimizer_step(self, total_loss: torch.Tensor) -> None:
@@ -415,7 +385,6 @@ class PPOHjbRNN(PPO_RNN):
         cumulative_hjb_residual_abs_mean: float,
         cumulative_hjb_value_abs_mean: float,
         cumulative_hjb_running_cost_mean: float,
-        cumulative_hjb_lidar_grad_term_abs_mean: float,
         denom: float,
     ) -> None:
         """Write averaged losses and policy stats to experiment tracking."""
@@ -428,11 +397,6 @@ class PPOHjbRNN(PPO_RNN):
             self.track_data("HJB / residual abs mean", cumulative_hjb_residual_abs_mean / denom)
             self.track_data("HJB / value phys abs mean", cumulative_hjb_value_abs_mean / denom)
             self.track_data("HJB / running cost mean", cumulative_hjb_running_cost_mean / denom)
-            if self._hjb_lidar_K > 0:
-                self.track_data(
-                    "HJB / lidar grad term abs mean",
-                    cumulative_hjb_lidar_grad_term_abs_mean / denom,
-                )
         self.track_data("Policy / Standard deviation", self.policy.distribution(role="policy").stddev.mean().item())
         if self.scheduler is not None:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
@@ -474,7 +438,6 @@ class PPOHjbRNN(PPO_RNN):
         cumulative_hjb_residual_abs_mean = 0.0
         cumulative_hjb_value_abs_mean = 0.0
         cumulative_hjb_running_cost_mean = 0.0
-        cumulative_hjb_lidar_grad_term_abs_mean = 0.0
 
         for epoch in range(self.cfg.learning_epochs):
             kl_divergences: List[torch.Tensor] = []
@@ -520,7 +483,6 @@ class PPOHjbRNN(PPO_RNN):
                 cumulative_hjb_residual_abs_mean += losses.hjb_residual_abs_mean
                 cumulative_hjb_value_abs_mean += losses.hjb_value_abs_mean
                 cumulative_hjb_running_cost_mean += losses.hjb_running_cost_mean
-                cumulative_hjb_lidar_grad_term_abs_mean += losses.hjb_lidar_grad_term_abs_mean
                 if self.cfg.entropy_loss_scale:
                     cumulative_entropy_loss += float(losses.entropy_loss.item())
 
@@ -535,6 +497,5 @@ class PPOHjbRNN(PPO_RNN):
             cumulative_hjb_residual_abs_mean,
             cumulative_hjb_value_abs_mean,
             cumulative_hjb_running_cost_mean,
-            cumulative_hjb_lidar_grad_term_abs_mean,
             denom,
         )

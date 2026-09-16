@@ -72,15 +72,10 @@ agent:
   hjb_step_dt: 0.0166666667
   # Hamiltonian evaluation mode: "policy" (on-policy u) or "optimal" (analytic u* from dH/du=0)
   hjb_hamiltonian_mode: optimal
-  # ObservationSchemaV2.1 vec layout (68 floats):
-  # [vx, wz, d_signed, heading_error, path_window(24), lidar_sectors(32), prev_action(2), prev_reward(6)]
+  # Vec layout (36 floats):
+  # [vx, wz, d_signed, heading_error, path_window(24), prev_action(2), prev_reward(6)]
   hjb_vec_d_index: 2
   hjb_vec_psi_index: 3
-  # LiDAR sector hits in body frame, used to extend HJB Hamiltonian dynamics with
-  # static-obstacle body-frame kinematics: x_dot = -v + w*y, y_dot = -w*x. Must match
-  # PirlEnvCfg.hjb_lidar_sector_count and the position appended in PirlEnv._build_vec_observation.
-  hjb_lidar_hits_start_index: 28
-  hjb_lidar_sector_count: 16
   time_limit_bootstrap: False
   # logging and checkpoint
   experiment:
