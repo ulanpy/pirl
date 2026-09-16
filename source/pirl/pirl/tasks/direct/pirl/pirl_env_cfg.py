@@ -100,11 +100,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     ground_static_friction = 0.7
     ground_dynamic_friction = 0.7
     ground_friction_combine = "max"
-    # Static warehouse scene (shelves + obstacles), no SceneBlox generation.
-    sceneblox_usd_paths: tuple[str, ...] = (
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Environments/Simple_Warehouse/warehouse_with_forklifts.usd",
-    )
-    # Runtime dynamic obstacles.
+    # Runtime dynamic obstacles are the only obstacle geometry in the minimal scene.
     #
     # Implementation: kinematic primitive cylinders driven by a single
     # `RigidObjectCollection` shared across envs. One CylinderCfg is instanced
@@ -131,29 +127,16 @@ class PirlEnvCfg(DirectRLEnvCfg):
     robot_cfg.init_state.pos = (0.0, 0.0, 0.02)
     
     # sensors
-    # Empty scene: MultiMeshRayCaster requires at least one target; use ground so rays can hit floor or max_distance
+    # The ground plane is a required raycast target; dynamic obstacle targets are appended by PirlEnv.
     lidar = MultiMeshRayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base_scan",
         # Use base_scan pose from URDF directly.
         offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.0)),
         # Rays rotate with robot heading/body.
         ray_alignment="base",
-        # Таргеты под GeneratedScene. Корень Warehouse_* не трогаем (xform); под ним — только SM_*.
         mesh_prim_paths=[
             MultiMeshRayCasterCfg.RaycastTargetCfg(
-                prim_expr="/World/envs/env_.*/GeneratedScene/GroundPlane",
-                track_mesh_transforms=False,
-            ),
-            MultiMeshRayCasterCfg.RaycastTargetCfg(
-                prim_expr="/World/envs/env_.*/GeneratedScene/Forklift.*",
-                track_mesh_transforms=False,
-            ),
-            MultiMeshRayCasterCfg.RaycastTargetCfg(
-                prim_expr="/World/envs/env_.*/GeneratedScene/SM_.*",
-                track_mesh_transforms=False,
-            ),
-            MultiMeshRayCasterCfg.RaycastTargetCfg(
-                prim_expr="/World/envs/env_.*/GeneratedScene/Warehouse_Empty_small_realtime/SM_.*",
+                prim_expr="/World/envs/env_.*/GroundPlane",
                 track_mesh_transforms=False,
             ),
         ],

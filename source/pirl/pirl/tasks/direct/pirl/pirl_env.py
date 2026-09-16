@@ -1,6 +1,5 @@
 from collections.abc import Sequence
 import math
-import os
 
 import isaaclab.sim as sim_utils
 import torch
@@ -54,25 +53,18 @@ class PirlEnv(DirectRLEnv):
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
-        # Spawn pre-generated SceneBlox USD scene into env_0 before cloning.
-        # With replicate_physics=True this propagates the same static map to all envs.
-        scene_paths = tuple(getattr(self.cfg, "sceneblox_usd_paths", ()))
-        if len(scene_paths) == 0:
-            raise RuntimeError("sceneblox_usd_paths is empty.")
-        scene_usd = scene_paths[0]
-        is_remote_usd = "://" in scene_usd
-        if (not is_remote_usd) and (not os.path.exists(scene_usd)):
-            raise FileNotFoundError(
-                f"Scene USD not found: {scene_usd}. Generate SceneBlox USDs first."
+        # The task intentionally has no static warehouse mesh. A simple ground plane is
+        # sufficient for robot physics; all obstacle geometry comes from DynamicObstacles.
+        ground_cfg = sim_utils.GroundPlaneCfg(
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=float(self.cfg.ground_static_friction),
+                dynamic_friction=float(self.cfg.ground_dynamic_friction),
+                friction_combine_mode=self.cfg.ground_friction_combine,
             )
-        scene_cfg = sim_utils.UsdFileCfg(usd_path=scene_usd)
-        scene_cfg.func(
-            "/World/envs/env_0/GeneratedScene",
-            scene_cfg,
-            translation=(0.0, 0.0, 0.0),
         )
+        ground_cfg.func("/World/envs/env_0/GroundPlane", ground_cfg)
 
-        # copy_from_source=True: each env gets full copy of the base scene.
+        # Copy the minimal base scene (ground plane) into every environment.
         self.scene.clone_environments(copy_from_source=True)
         self.scene.articulations["robot"] = self.robot
         # Dynamic obstacles: a single RigidObjectCollection with one CylinderCfg per
