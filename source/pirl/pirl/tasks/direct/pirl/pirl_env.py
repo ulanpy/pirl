@@ -258,16 +258,24 @@ class PirlEnv(DirectRLEnv):
                     self._latest_lidar_ranges_m.min(dim=1)[0] < float(self.cfg.collision_robot_radius)
                 )
             collision_val = lidar_collision_done.unsqueeze(-1).float() * float(self.cfg.rew_scale_collision)
-            reverse_val = torch.zeros_like(forward_speed)
-            if self.cfg.rew_scale_reverse != 0:
-                reverse_val = float(self.cfg.rew_scale_reverse) * torch.clamp(-forward_speed, min=0.0)
+            time_val = torch.full_like(progress_val, float(self.cfg.rew_scale_time))
+            if hasattr(self, "final_goal_dist"):
+                final_reached = self.final_goal_dist < float(self.cfg.path_goal_threshold)
+            else:
+                final_targets_w = self.path_manager.path_points_w[:, -1]
+                final_reached = (
+                    torch.linalg.norm(final_targets_w - self.robot.data.root_pos_w[:, :2], dim=-1, keepdim=True)
+                    < float(self.cfg.path_goal_threshold)
+                )
+            success_val = final_reached.float() * float(self.cfg.rew_scale_success)
             reward = (
                 progress_val +
                 cte_val +
                 heading_val +
                 proximity_val +
                 collision_val +
-                reverse_val
+                time_val +
+                success_val
             )
 
             self.prev_path_s.copy_(self.curr_path_s)
@@ -280,21 +288,11 @@ class PirlEnv(DirectRLEnv):
             self.extras["log"]["rew/heading"] = torch.mean(heading_val)
             self.extras["log"]["rew/proximity"] = torch.mean(proximity_val)
             self.extras["log"]["rew/collision"] = torch.mean(collision_val)
-            self.extras["log"]["rew/reverse"] = torch.mean(reverse_val)
+            self.extras["log"]["rew/time"] = torch.mean(time_val)
+            self.extras["log"]["rew/success"] = torch.mean(success_val)
             self.extras["log"]["rew/total"] = torch.mean(reward)
             self.extras["log"]["collision/lidar"] = lidar_collision_done.float().mean()
-            # Diagnostics for forward-speed sign consistency against commanded linear speed.
-            cmd_lin = self.actions[:, 0].unsqueeze(-1) * float(self.cfg.max_lin_vel)
-            v_mean = torch.mean(forward_speed)
-            c_mean = torch.mean(cmd_lin)
-            v_centered = forward_speed - v_mean
-            c_centered = cmd_lin - c_mean
-            corr = torch.mean(v_centered * c_centered) / (
-                torch.std(forward_speed).clamp(min=1e-6) * torch.std(cmd_lin).clamp(min=1e-6)
-            )
-            self.extras["log"]["debug/v_fwd_mean"] = v_mean
-            self.extras["log"]["debug/cmd_lin_mean"] = c_mean
-            self.extras["log"]["debug/v_fwd_cmd_corr"] = corr
+
             denom = torch.mean(torch.abs(reward)) + 1e-6
             self.extras["log"]["rew_ratio/progress"] = torch.mean(torch.abs(progress_val)) / denom
             self.extras["log"]["rew_ratio/path_error"] = torch.mean(torch.abs(cte_val)) / denom
@@ -304,7 +302,6 @@ class PirlEnv(DirectRLEnv):
                 heading_val,
                 proximity_val,
                 collision_val,
-                reverse_val,
             )
             self.prev_reward_components = torch.clamp(
                 torch.cat(reward_components, dim=-1),

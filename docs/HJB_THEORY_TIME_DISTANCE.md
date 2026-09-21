@@ -129,10 +129,10 @@ $$
 
 ## 5) Input indices in current `vec`
 
-Current `vec` layout (36 floats, see `pirl_env._build_vec_observation`):
+Current `vec` layout (35 floats, see `pirl_env._build_vec_observation`):
 
 $$
-[v_x,\, \omega_z,\, d,\, \psi,\, \text{path window} (24),\, \text{prev action} (2),\, \text{prev reward} (6)]
+[v_x,\, \omega_z,\, d,\, \psi,\, \text{path window} (24),\, \text{prev action} (2),\, \text{prev reward} (5)]
 $$
 
 Therefore:

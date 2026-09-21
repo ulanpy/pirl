@@ -8,7 +8,7 @@
 ONNX policy принимает:
 
 ```text
-vec:       float32[1, 36]
+vec:       float32[1, 35]
 costmap:   float32[1, 6, 100, 100]
 rnn_state: float32[1, 1, 256]
 ```
@@ -40,14 +40,14 @@ rnn_state_out: float32[1, 1, 256]
 ```text
 rnn_state = zeros[1, 1, 256]
 prev_action = zeros[2]
-prev_reward_components = zeros[6]
+prev_reward_components = zeros[5]
 costmap_history = unknown frames
 ```
 
 На каждом control tick:
 
 1. Собрать `costmap[6,100,100]`.
-2. Собрать `vec[36]`.
+2. Собрать `vec[35]`.
 3. Вызвать ONNX.
 4. Сохранить `rnn_state_out` как следующий `rnn_state`.
 5. Сохранить `mean` как `prev_action` для следующего tick.
@@ -120,7 +120,7 @@ float known_mask(uint8_t nav2_cost) {
 Форма:
 
 ```text
-vec = float32[36]
+vec = float32[35]
 ```
 
 Layout:
@@ -132,7 +132,7 @@ Layout:
 3      heading_error_rad
 4-27   path_window_base_link: 12 points * [x_m, y_m]
 28-29  prev_action: normalized [linear, yaw]
-30-35  prev_reward_components: [progress, path_error, heading, proximity, collision, reverse]
+30-34  prev_reward_components: [progress, path_error, heading, proximity, collision]
 ```
 
 ### 0-1: Ego Velocity
@@ -209,7 +209,7 @@ v_cmd = mean[0] * max_lin_vel   # currently 0.5 m/s
 w_cmd = mean[1] * max_ang_vel   # currently 1.5 rad/s
 ```
 
-### 30-35: Previous Reward Components
+### 30-34: Previous Reward Components
 
 Use reward components from the previous tick:
 
@@ -219,15 +219,15 @@ Use reward components from the previous tick:
 32 heading
 33 proximity
 34 collision
-35 reverse
 ```
 
 Clamp values to `[-1, 1]` before inserting into `vec`, matching training.
+The per-step time cost and terminal success bonus are not included in this history.
 
 On reset:
 
 ```text
-prev_reward_components = [0, 0, 0, 0, 0, 0]
+prev_reward_components = [0, 0, 0, 0, 0]
 ```
 
 ## Minimal Pseudocode
@@ -236,7 +236,7 @@ prev_reward_components = [0, 0, 0, 0, 0, 0]
 struct PirlRuntimeState {
   float rnn_state[1][1][256] = {};
   float prev_action[2] = {};
-  float prev_reward_components[6] = {};
+  float prev_reward_components[5] = {};
   CostmapHistory history;
 };
 
@@ -262,7 +262,7 @@ Observation build_observation(
 
   obs.vec[28] = state.prev_action[0];
   obs.vec[29] = state.prev_action[1];
-  for (int i = 0; i < 6; ++i) {
+  for (int i = 0; i < 5; ++i) {
     obs.vec[30 + i] = clamp(state.prev_reward_components[i], -1.0f, 1.0f);
   }
 
@@ -299,7 +299,7 @@ cmd_vel.angular.z = mean[1] * 1.5f;
 
 ## Checklist
 
-- `vec` shape is exactly `[1, 36]`.
+- `vec` shape is exactly `[1, 35]`.
 - `costmap` shape is exactly `[1, 6, 100, 100]`.
 - Costmap channel order is `[cost, known_mask]` for newest, previous, oldest frames.
 - Path window is 12 points in `base_link`, resampled at `0.10 m`.

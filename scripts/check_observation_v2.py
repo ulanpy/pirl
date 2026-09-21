@@ -40,7 +40,7 @@ def main() -> None:
         grid_normalize=True,
         grid_channels_per_frame=2,
         path_segment_len=12,
-        reward_component_dim=6,
+        reward_component_dim=5,
         lidar_num_rays=360,
         lidar=SimpleNamespace(max_distance=18.0),
     )

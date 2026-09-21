@@ -60,14 +60,13 @@ class PirlEnvCfg(DirectRLEnvCfg):
     path_num_points = int(round(path_length_m / path_point_spacing_m)) + 1  # derived point count
     path_segment_len = 12
     path_goal_threshold = 0.4  # distance to count waypoint as reached
-    # Keep reward-history observation shape in sync with enabled reward components.
+    # Keep reward-history observation shape in sync with reward components.
     reward_component_names = (
         "progress",
         "path_error",
         "heading",
         "proximity",
         "collision",
-        "reverse",
     )
     reward_component_dim = len(reward_component_names)
     reward_component_obs_clip = 1.0
@@ -109,15 +108,15 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # for obstacle-avoidance learning and avoids the per-prim USD overhead of
     # ArchVis assets (~linear with num_envs × slot_count).
     dyn_obstacle_enabled = True
-    dyn_obstacle_slot_count = 20              # distinct cylinders per env (= collection objects)
-    dyn_obstacle_count_range = (16, 20)        # active cylinders per episode, clamped to slot_count
+    dyn_obstacle_slot_count = 3              # distinct cylinders per env (= collection objects)
+    dyn_obstacle_count_range = (1, 3)        # active cylinders per episode, clamped to slot_count
     dyn_obstacle_radius = 0.25               # cylinder radius, m
     dyn_obstacle_height = 1.0                # cylinder height, m
     dyn_obstacle_xy_range = ((-6.0, 6.0), (-6.0, 6.0))
     dyn_obstacle_keepout_radius = 0.5        # free disc around env origin (robot spawn zone)
     dyn_obstacle_min_separation = 1.5        # pairwise cylinder separation, m
     dyn_obstacle_motion_radius_range = (0.4, 1.0)
-    dyn_obstacle_motion_speed_range = (0.2, 0.8)  # angular speed, rad/s
+    dyn_obstacle_motion_speed_range = (0.05, 0.2)  # angular speed, rad/s
     dyn_obstacle_z_world = 0.5               # cylinder centre height, m (= height/2 above ground)
 
     # robot(s)
@@ -168,19 +167,23 @@ class PirlEnvCfg(DirectRLEnvCfg):
 
     # cmd_vel limits and robot geometry (for wheel speed conversion)
     max_lin_vel = 0.22  # m/s
-    max_ang_vel = 2.84  # rad/s
+    max_ang_vel = 1.5  # rad/s
     wheel_radius = 0.033  # m
     track_width = 0.16  # m
     
     # Core reward: r = w1*(s_t - s_{t-1}) - w2*d_path^2 + w3*cos(delta_heading)
     rew_scale_progress = 10.0
+    # Per-step time cost and one-shot bonus on reaching the final path point.
+    # They shape episode duration but are deliberately not part of reward history.
+    rew_scale_time = -0.002
+    rew_scale_success = 5.0
     # Cross-track distance penalty coefficient (w2). Applied QUADRATICALLY in _get_rewards()
     # so that small offsets cost almost nothing while large offsets overwhelm the
     # +progress/+heading terms, killing the "drive parallel at fixed offset" exploit.
     # Reference scale: at d=0.5 m penalty is -0.5^2 * 0.3 = -0.075/step (> progress 0.06);
     # at d=0.1 m it is -0.003/step (negligible, doesn't punish normal tracking noise).
     rew_scale_path_error = 0.3
-    # Extra safety shaping terms (proximity/collision/reverse) are enabled.
+    # Extra safety shaping terms (proximity/collision) are enabled.
     # Tuned to reduce "freezing" behavior near obstacles while preserving safety pressure.
     rew_scale_collision = -25.0
     collision_robot_radius = 0.14
@@ -188,7 +191,6 @@ class PirlEnvCfg(DirectRLEnvCfg):
     proximity_exponential_rate = 2.0
     proximity_front_fov_deg = 360.0
     rew_proximity_max_penalty = -0.15
-    rew_scale_reverse = 0.0
     # Heading alignment coefficient (w3): reward adds w3 * cos(delta_heading) * forward_gate.
     # Gated by forward speed in _get_rewards(), so no bonus for "face path + reverse".
     rew_scale_heading = 0.05
