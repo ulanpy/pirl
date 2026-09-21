@@ -6,15 +6,18 @@ seed: 669
 models:
   separate: True
   policy:
-    class: RecurrentGaussianPolicy
+    class: RecurrentGaussianPolicy  # Transformer actor using SKRL's recurrent cache interface
     clip_actions: False
     clip_log_std: True
     min_log_std: -20.0
     max_log_std: 2.0
     initial_log_std: -0.6
-    sequence_length: 64
-    gru_hidden_size: 256
-    gru_num_layers: 1
+    sequence_length: 64  # PPO replay window; independent of attention context length
+    transformer_model_dim: 128
+    transformer_num_heads: 4
+    transformer_num_layers: 2
+    transformer_context_len: 32  # Prior tokens; current token is additional (~0.53 s at 60 Hz)
+    transformer_ff_dim: 512
     aux_dim: 8
   value:
     class: FeedForwardDeterministicValue

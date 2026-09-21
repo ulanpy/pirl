@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
-import gymnasium
 import torch
 import torch.nn as nn
 from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
@@ -19,16 +19,37 @@ def _flat_tensor(inputs: Mapping[str, Any]) -> torch.Tensor:
     return tensor
 
 
-class _RecurrentBackbone(nn.Module):
+class _TransformerBackbone(nn.Module):
+    """Per-observation encoder followed by attention over a sliding token window.
+
+    SKRL's recurrent state carries [context_len, batch, model_dim + 1]:
+    encoded observations plus a validity bit. Zero state is an empty cache.
+    Cached rollout tokens are detached; tokens encoded within a training window
+    retain gradients into the CNN/MLPs.
+    """
+
     def __init__(
         self,
         vec_dim: int,
         costmap_shape: tuple[int, int, int],
-        gru_hidden_size: int,
-        gru_num_layers: int,
+        transformer_model_dim: int,
+        transformer_num_heads: int,
+        transformer_num_layers: int,
+        transformer_context_len: int,
+        transformer_ff_dim: int,
         aux_dim: int = 0,
     ) -> None:
         super().__init__()
+        if min(
+            transformer_model_dim, transformer_num_heads, transformer_num_layers,
+            transformer_context_len, transformer_ff_dim,
+        ) < 1:
+            raise ValueError("Transformer dimensions, heads, layers and context must be positive.")
+        if transformer_model_dim % transformer_num_heads:
+            raise ValueError("transformer_model_dim must be divisible by transformer_num_heads.")
+        self.model_dim = transformer_model_dim
+        self.num_heads = transformer_num_heads
+        self.context_len = transformer_context_len
         c, h, w = costmap_shape
         self.aux_dim = min(aux_dim, vec_dim)
         core_dim = vec_dim - self.aux_dim
@@ -65,24 +86,72 @@ class _RecurrentBackbone(nn.Module):
         self.fusion = nn.Sequential(
             nn.Linear(fusion_input_dim, 256),
             nn.ELU(),
-            nn.Linear(256, 128),
+            nn.Linear(256, self.model_dim),
             nn.ELU(),
         )
-        self.pre_gru_ln = nn.LayerNorm(128)
-        self.gru = nn.GRU(
-            input_size=128,
-            hidden_size=gru_hidden_size,
-            num_layers=gru_num_layers,
-            batch_first=True,
+        self.token_norm = nn.LayerNorm(self.model_dim)
+        # Position is relative to the current tick: slots -context_len, ..., 0.
+        self.position_embedding = nn.Parameter(torch.empty(self.context_len + 1, self.model_dim))
+        nn.init.normal_(self.position_embedding, std=0.02)
+        self.transformer = nn.ModuleList(
+            nn.TransformerEncoderLayer(
+                d_model=self.model_dim,
+                nhead=self.num_heads,
+                dim_feedforward=transformer_ff_dim,
+                dropout=0.0,  # PPO replay must use the same policy as collection.
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            for _ in range(transformer_num_layers)
         )
-        self.post_gru_ln = nn.LayerNorm(gru_hidden_size)
+        self.output_norm = nn.LayerNorm(self.model_dim)
+
+    def _attend(
+        self, seq: torch.Tensor, cache: torch.Tensor, done: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate exactly the same bounded windows in replay and single-step use."""
+        batch, steps, _ = seq.shape
+        past = cache.transpose(0, 1).to(dtype=seq.dtype)
+        tokens = torch.cat((past[..., :-1], seq), dim=1)
+        valid = torch.cat((past[..., -1].bool(), torch.ones_like(done)), dim=1)
+        # done[t] describes the transition AFTER observation t. Reset before t+1.
+        episode = done.long().cumsum(dim=1) - done.long()
+        token_episode = torch.cat((episode.new_zeros(batch, self.context_len), episode), dim=1)
+        window_size = self.context_len + 1
+        windows = tokens.unfold(1, window_size, 1).permute(0, 1, 3, 2)
+        window_valid = valid.unfold(1, window_size, 1) & (
+            token_episode.unfold(1, window_size, 1) == episode.unsqueeze(-1)
+        )
+        windows = windows.reshape(batch * steps, window_size, self.model_dim)
+        window_valid = window_valid.reshape(batch * steps, window_size)
+        windows = windows.masked_fill(~window_valid.unsqueeze(-1), 0)
+        windows = windows + self.position_embedding.to(dtype=seq.dtype)
+
+        causal = torch.ones(window_size, window_size, dtype=torch.bool, device=seq.device).triu(1)
+        mask = causal.unsqueeze(0) | ~window_valid.unsqueeze(1)
+        # Padded queries may attend to themselves so no softmax row is all masked.
+        # They remain blocked as keys for every valid query in every layer.
+        mask.diagonal(dim1=-2, dim2=-1).fill_(False)
+        mask = mask.repeat_interleave(self.num_heads, dim=0)
+        for layer in self.transformer:
+            windows = layer(windows, src_mask=mask)
+        features = self.output_norm(windows[:, -1])
+
+        next_valid = valid[:, -self.context_len:] & (
+            token_episode[:, -self.context_len:] == done.long().sum(dim=1, keepdim=True)
+        )
+        next_tokens = tokens[:, -self.context_len:].masked_fill(~next_valid.unsqueeze(-1), 0)
+        next_cache = torch.cat((next_tokens, next_valid.unsqueeze(-1).to(seq.dtype)), dim=-1)
+        return features, next_cache.transpose(0, 1).contiguous()
 
     def forward(
         self,
         states: torch.Tensor,
-        rnn_state: torch.Tensor | None,
+        cache: torch.Tensor | None,
         sequence_length: int,
         terminated: torch.Tensor | None = None,
+        truncated: torch.Tensor | None = None,
         vec_start: int = 0,
         vec_dim: int = 0,
         costmap_start: int = 0,
@@ -103,65 +172,32 @@ class _RecurrentBackbone(nn.Module):
             enc = torch.cat((core_enc, aux_enc, self.cnn(costmap)), dim=-1)
         else:
             enc = torch.cat((self.vec_net(vec), self.cnn(costmap)), dim=-1)
-        enc = self.pre_gru_ln(self.fusion(enc))
-
-        use_sequence = (
-            terminated is not None
-            and sequence_length > 1
-            and (enc.shape[0] % sequence_length == 0)
-        )
-
-        if terminated is not None and sequence_length > 1 and (enc.shape[0] % sequence_length != 0):
+        enc = self.token_norm(self.fusion(enc))
+        steps = sequence_length if terminated is not None or truncated is not None else 1
+        if steps < 1 or enc.shape[0] % steps:
             raise ValueError(
-                "RNN training batch size is not divisible by sequence_length. "
-                f"Got batch={enc.shape[0]}, sequence_length={sequence_length}. "
-                "Adjust sequence_length / rollouts / num_envs / mini_batches so each sampled batch is divisible."
+                f"Batch size {enc.shape[0]} must be divisible by positive sequence_length={steps}."
             )
-
-        if not use_sequence:
-            if rnn_state is None:
-                rnn_state = torch.zeros(
-                    self.gru.num_layers,
-                    enc.shape[0],
-                    self.gru.hidden_size,
-                    device=enc.device,
-                    dtype=enc.dtype,
-                )
-            out, rnn_next = self.gru(enc.unsqueeze(1), rnn_state)
-            return self.post_gru_ln(out.squeeze(1)), rnn_next
-
-        batch = enc.shape[0] // sequence_length
-        seq = enc.reshape(batch, sequence_length, -1)
-
-        # skrl memory stores RNN state per transition. For sequence training we need
-        # initial state per sequence (take first state in each sequence window).
-        if rnn_state is None:
-            rnn_state = torch.zeros(
-                self.gru.num_layers, batch, self.gru.hidden_size, device=enc.device, dtype=enc.dtype
-            )
-        elif rnn_state.shape[1] == enc.shape[0]:
-            rnn_state = rnn_state[:, ::sequence_length, :]
-        elif rnn_state.shape[1] != batch:
-            rnn_state = rnn_state[:, :batch, :]
-
-        assert terminated is not None
-        done_mask = terminated.reshape(batch, sequence_length, -1).squeeze(-1).float()
-
-        outputs = []
-        h_t = rnn_state
-        for t in range(sequence_length):
-            if done_mask is not None:
-                # Reset hidden state where episode ended at current transition.
-                alive = (1.0 - done_mask[:, t]).view(1, batch, 1)
-                h_t = h_t * alive
-            o_t, h_t = self.gru(seq[:, t : t + 1, :], h_t)
-            outputs.append(o_t)
-        out = torch.cat(outputs, dim=1).reshape(-1, self.gru.hidden_size)
-        out = self.post_gru_ln(out)
-        return out, h_t
+        batch = enc.shape[0] // steps
+        if cache is None:
+            cache = enc.new_zeros(self.context_len, batch, self.model_dim + 1)
+        elif cache.shape[1] == enc.shape[0]:
+            # SKRL stores an incoming cache per transition. Replay starts from
+            # the first cache of each sequence, rebuilding later tokens with gradients.
+            cache = cache[:, ::steps, :]
+        if tuple(cache.shape) != (self.context_len, batch, self.model_dim + 1):
+            raise ValueError(f"Unexpected transformer cache shape: {tuple(cache.shape)}.")
+        done = torch.zeros(batch, steps, dtype=torch.bool, device=enc.device)
+        if terminated is not None:
+            done = done | terminated.reshape(batch, steps).bool()
+        if truncated is not None:
+            done = done | truncated.reshape(batch, steps).bool()
+        return self._attend(enc.reshape(batch, steps, -1), cache.detach(), done)
 
 
 class RecurrentGaussianPolicy(GaussianMixin, Model):
+    """Causal transformer actor; name and ``rnn`` keys retain SKRL runner compatibility."""
+
     def __init__(
         self,
         observation_space,
@@ -170,8 +206,11 @@ class RecurrentGaussianPolicy(GaussianMixin, Model):
         state_space=None,
         num_envs: int = 1,
         sequence_length: int = 32,
-        gru_hidden_size: int = 128,
-        gru_num_layers: int = 1,
+        transformer_model_dim: int = 128,
+        transformer_num_heads: int = 4,
+        transformer_num_layers: int = 2,
+        transformer_context_len: int = 32,
+        transformer_ff_dim: int = 512,
         aux_dim: int = 0,
         clip_actions: bool = False,
         clip_log_std: bool = True,
@@ -201,16 +240,21 @@ class RecurrentGaussianPolicy(GaussianMixin, Model):
         )
         self._num_envs = int(num_envs)
         self._sequence_length = int(sequence_length)
-        self.backbone = _RecurrentBackbone(
+        if self._sequence_length < 1:
+            raise ValueError("sequence_length must be positive.")
+        self.backbone = _TransformerBackbone(
             vec_dim=self._vec_dim,
             costmap_shape=self._costmap_shape,
-            gru_hidden_size=int(gru_hidden_size),
-            gru_num_layers=int(gru_num_layers),
+            transformer_model_dim=int(transformer_model_dim),
+            transformer_num_heads=int(transformer_num_heads),
+            transformer_num_layers=int(transformer_num_layers),
+            transformer_context_len=int(transformer_context_len),
+            transformer_ff_dim=int(transformer_ff_dim),
             aux_dim=int(aux_dim),
         )
         action_dim = int(self.num_actions) if self.num_actions is not None else int(math.prod(action_space.shape))
         self.mean_head = nn.Sequential(
-            nn.Linear(int(gru_hidden_size), 128),
+            nn.Linear(int(transformer_model_dim), 128),
             nn.ELU(),
             nn.Linear(128, 64),
             nn.ELU(),
@@ -222,27 +266,27 @@ class RecurrentGaussianPolicy(GaussianMixin, Model):
         return {
             "rnn": {
                 "sequence_length": self._sequence_length,
-                "sizes": [(self.backbone.gru.num_layers, self._num_envs, self.backbone.gru.hidden_size)],
+                "sizes": [(self.backbone.context_len, self._num_envs, self.backbone.model_dim + 1)],
             }
         }
 
     def compute(self, inputs, role=""):
         states = _flat_tensor(inputs)
         rnn_list = inputs.get("rnn", None)
-        rnn_state = rnn_list[0] if rnn_list else None
-        terminated = inputs.get("terminated", None)
-        feats, rnn_next = self.backbone(
+        cache = rnn_list[0] if rnn_list else None
+        feats, next_cache = self.backbone(
             states=states,
-            rnn_state=rnn_state,
+            cache=cache,
             sequence_length=self._sequence_length,
-            terminated=terminated,
+            terminated=inputs.get("terminated"),
+            truncated=inputs.get("truncated"),
             vec_start=self._vec_start,
             vec_dim=self._vec_dim,
             costmap_start=self._costmap_start,
             costmap_shape=self._costmap_shape,
         )
         mean = self.mean_head(feats)
-        return mean, {"log_std": self.log_std_parameter, "rnn": [rnn_next]}
+        return mean, {"log_std": self.log_std_parameter, "rnn": [next_cache]}
 
 
 class FeedForwardDeterministicValue(DeterministicMixin, Model):
