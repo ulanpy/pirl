@@ -4,7 +4,7 @@
 
 ## High-Level Summary
 
-`pirl` is an Isaac Lab / Isaac Sim reinforcement-learning project for local obstacle avoidance with a wheeled differential-drive robot in dynamic warehouse-like scenes. The project trains a SKRL PPO-RNN controller over LiDAR-derived local costmaps, path-following vector observations, and per-sector LiDAR hit positions, with an optional HJB-style critic regularizer that uses both the path-tracking error state and body-frame static-obstacle kinematics.
+`pirl` is an Isaac Lab / Isaac Sim reinforcement-learning project for local obstacle avoidance with a wheeled differential-drive robot in dynamic warehouse-like scenes. The project trains a SKRL PPO-RNN controller over LiDAR-derived local costmaps, path-following vector observations, and per-sector LiDAR hit positions.
 
 ## Repository Map
 
@@ -13,8 +13,6 @@
   - [environment.md](docs/environment.md) — Task definitions, reward shaping, scene setup.
   - [DEPLOYMENT_OBSERVATION_SPACE.md](docs/DEPLOYMENT_OBSERVATION_SPACE.md) — ONNX actor schema (input/output shapes, normalization).
   - [pirl_path_contract_ros_like.md](docs/pirl_path_contract_ros_like.md) — Path manager interface for ROS2 controllers.
-  - [HJB_THEORY_TIME_DISTANCE.md](docs/HJB_THEORY_TIME_DISTANCE.md) — Math and theory behind HJB auxiliary loss.
-  - [ppo_aux_architecture_graph.md](docs/ppo_aux_architecture_graph.md) — Network diagrams (policy, value, recurrent state).
 - **scripts/** — Training and inference entry points:
   - `train.py` — Launch PPO training runs.
   - `play.py` — Playback trained policies interactively.
@@ -26,9 +24,8 @@
   - `pirl_env_costmap.py` — Multi-channel costmap rendering.
 - **source/pirl/pirl/tasks/direct/pirl/agents/** — Policy and training:
   - `recurrent_models.py` — GRU policy and value networks.
-  - `ppo_hjb_rnn.py` — SKRL trainer with HJB auxiliary loss.
   - `obs_layout.py` — Observation dict structure and flat-state ordering.
-  - `skrl_ppo_aux_cfg.yaml` — SKRL training hyperparameters.
+  - `skrl_ppo_rnn_cfg.yaml` — SKRL PPO-RNN hyperparameters.
 - **logs/** and **outputs/** — Generated training artifacts (checkpoints, event files, resolved configs).
 - **pyproject.toml** — Repository-level configuration (linting, formatting, type checking with Pyright).
 
@@ -64,7 +61,7 @@ Inside the container (`/workspace/pirl`):
 ```bash
 python -m pip install -e source/pirl   # once per environment
 python scripts/list_envs.py
-python scripts/skrl/play.py --task=burger --agent=skrl_ppo_aux_cfg_entry_point --checkpoint=<PATH>
+python scripts/skrl/play.py --task=burger --agent=skrl_ppo_rnn_cfg_entry_point --checkpoint=<PATH>
 ```
 
 Long training jobs should only be launched explicitly:
@@ -73,7 +70,7 @@ Long training jobs should only be launched explicitly:
 python scripts/skrl/train.py --task=burger
 ```
 
-**Training flags:** `--livestream 1`, `--num_envs 8` (default 8), `--max_iterations 1000` (default 10000). Logs land in `logs/skrl/<task>_direct/TIMESTAMP_ppo_aux_torch/`.
+**Training flags:** `--livestream 1`, `--num_envs 8` (default 8), `--max_iterations 1000` (default 10000). Logs land in `logs/skrl/<task>_direct/TIMESTAMP_ppo_rnn_torch/`.
 
 **ONNX export:**
 
@@ -107,8 +104,8 @@ flowchart LR
   J --> K[actions: lin/yaw]
   K --> B
   B --> L[reward terms]
-  L --> M[PPOHjbRNN]
-  M --> N[policy/value/HJB losses]
+  L --> M[PPO_RNN]
+  M --> N[policy/value losses]
 ```
 
 Data flow summary:
@@ -120,14 +117,12 @@ Data flow summary:
    are saved in full SKRL checkpoints.
 4. `RecurrentGaussianPolicy` outputs normalized linear/yaw actions and a recurrent hidden state. The environment
    maps normalized actions to differential-drive wheel velocity targets.
-5. Rewards combine path progress, path error, heading alignment, proximity/collision, and optional reverse shaping.
-
-Network diagrams: [docs/ppo_aux_architecture_graph.md](docs/ppo_aux_architecture_graph.md).
+5. Rewards combine path progress, path error, heading alignment, proximity/collision, time cost, and success bonus.
 
 ## Configuration
 
 - **Task/scene/rewards:** `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py`
-- **SKRL hyperparameters:** `source/pirl/pirl/tasks/direct/pirl/agents/skrl_ppo_aux_cfg.yaml`
+- **SKRL hyperparameters:** `source/pirl/pirl/tasks/direct/pirl/agents/skrl_ppo_rnn_cfg.yaml`
 
 ## Deployment And ONNX
 
@@ -166,7 +161,7 @@ reimplement Python Dict flattening or scaler slicing.
 - Add abstractions only when they remove real duplication or match an established local pattern.
 
 **Treat coupled systems as explicit contracts:**
-- Observation layout, action mapping, reward definitions, HJB/CBF math, and deployment export are tightly coupled.
+- Observation layout, action mapping, reward definitions, and deployment export are tightly coupled.
 - Changing one usually requires checking all others.
 - When updating policy inputs, policy architecture, recurrent state size, action scaling, or state normalization, update `scripts/toOnnx.py` in the same change. This includes `vec` layout, costmap shape, Dict flattening, scaler behavior, GRU size/layers, and mean_head.
 
@@ -194,7 +189,7 @@ Use checks that fit the change. Smoke tests are optional: run them when they pro
 
 **Slow training / low GPU use** — check `nvidia-smi`, increase `--num_envs` if memory allows, try `--livestream 1` to rule out rendering bottlenecks.
 
-**Observation shape mismatch at playback** — checkpoint must match current `obs_layout.py` and `skrl_ppo_aux_cfg.yaml`; run `python scripts/check_observation_v2.py`.
+**Observation shape mismatch at playback** — checkpoint must match current `obs_layout.py` and `skrl_ppo_rnn_cfg.yaml`; run `python scripts/check_observation_v2.py`.
 
 **Docker permission errors on logs** — set `DOCKER_UID=$(id -u)` and `DOCKER_GID=$(id -g)` in the environment before the Compose command, or set `UID`/`GID` in `docker-compose.overlay.yaml`.
 
@@ -204,11 +199,8 @@ Use checks that fit the change. Smoke tests are optional: run them when they pro
 - `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py`
 - `source/pirl/pirl/tasks/direct/pirl/pirl_env_costmap.py`
 - `source/pirl/pirl/tasks/direct/pirl/agents/recurrent_models.py`
-- `source/pirl/pirl/tasks/direct/pirl/agents/ppo_hjb_rnn.py`
 - `source/pirl/pirl/tasks/direct/pirl/agents/obs_layout.py`
-- `source/pirl/pirl/tasks/direct/pirl/agents/skrl_ppo_aux_cfg.yaml`
+- `source/pirl/pirl/tasks/direct/pirl/agents/skrl_ppo_rnn_cfg.yaml`
 - `scripts/toOnnx.py`
 - `docs/DEPLOYMENT_OBSERVATION_SPACE.md`
 - `docs/pirl_path_contract_ros_like.md`
-- `docs/ppo_aux_architecture_graph.md`
-- `docs/HJB_THEORY_TIME_DISTANCE.md`

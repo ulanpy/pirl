@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from .ppo_hjb_rnn import PPOHjbRNN, PPOHjbRNN_default_config
 from .recurrent_models import (
     FeedForwardDeterministicValue,
     RecurrentGaussianPolicy,

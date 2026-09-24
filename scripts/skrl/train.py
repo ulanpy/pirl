@@ -33,7 +33,7 @@ parser.add_argument("--task", type=str, default="burger", help="Name of the task
 parser.add_argument(
     "--agent",
     type=str,
-    default="skrl_ppo_aux_cfg_entry_point",
+    default="skrl_ppo_rnn_cfg_entry_point",
     help=(
         "Name of the RL agent configuration entry point. Defaults to None, in which case the argument "
         "--algorithm is used to determine the default agent configuration entry point."

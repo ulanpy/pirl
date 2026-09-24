@@ -19,7 +19,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.pirl_env_cfg:PirlEnvCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-        "skrl_ppo_aux_cfg_entry_point": f"{agents.__name__}:skrl_ppo_aux_cfg.yaml",
+        "skrl_ppo_rnn_cfg_entry_point": f"{agents.__name__}:skrl_ppo_rnn_cfg.yaml",
 
     },
 )

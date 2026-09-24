@@ -1,8 +1,6 @@
 # PIRL
 
-Recurrent PPO local navigation with **physics-informed (HJB) critic regularization**, trained in Isaac Lab and exported to ONNX.
-
-> Thesis: *Physics-Informed Regularization for PPO-RNN in Autonomous Obstacle Avoidance under Partial Observability* — Ulan Sharipov, Nazarbayev University, 2026.
+Recurrent PPO local navigation, trained in Isaac Lab and exported to ONNX.
 
 Architecture, CLI options, ONNX export, configuration, validation, and troubleshooting: [AGENTS.md](AGENTS.md).
 
@@ -66,8 +64,8 @@ python scripts/list_envs.py   # expect burger
 ```bash
 python scripts/skrl/play.py \
   --task=burger \
-  --agent=skrl_ppo_aux_cfg_entry_point \
-  --checkpoint=logs/skrl/burger_direct/2026-06-04_14-09-41_ppo_aux_torch/ \
+  --agent=skrl_ppo_rnn_cfg_entry_point \
+  --checkpoint=<CHECKPOINT.pt> \
   --livestream 2
 ```
 
@@ -94,11 +92,9 @@ Open `http://localhost:6006` from the host if port 6006 is exposed in Docker. `-
 | Topic | Doc |
 | --- | --- |
 | Architecture, deployment, CLI, troubleshooting | [AGENTS.md](AGENTS.md) |
-| Network diagrams | [docs/ppo_aux_architecture_graph.md](docs/ppo_aux_architecture_graph.md) |
 | Task definitions & rewards | [docs/environment.md](docs/environment.md) |
 | ONNX / observation schema (V2.1) | [docs/DEPLOYMENT_OBSERVATION_SPACE.md](docs/DEPLOYMENT_OBSERVATION_SPACE.md) |
 | ROS2 path manager contract | [docs/pirl_path_contract_ros_like.md](docs/pirl_path_contract_ros_like.md) |
-| HJB regularizer theory | [docs/HJB_THEORY_TIME_DISTANCE.md](docs/HJB_THEORY_TIME_DISTANCE.md) |
 
 ---
 

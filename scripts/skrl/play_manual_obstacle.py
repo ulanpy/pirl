@@ -34,10 +34,9 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent",
     type=str,
-    default="skrl_ppo_aux_cfg_entry_point",
+    default="skrl_ppo_rnn_cfg_entry_point",
     help=(
-        "Agent config entry point. Defaults to skrl_ppo_aux_cfg_entry_point so "
-        "ppo_aux checkpoints load with matching model definitions."
+        "Agent config entry point. Defaults to skrl_ppo_rnn_cfg_entry_point."
     ),
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
@@ -338,4 +337,3 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
 if __name__ == "__main__":
     main()
     simulation_app.close()
-

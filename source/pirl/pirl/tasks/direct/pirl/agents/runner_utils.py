@@ -28,14 +28,11 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
             def _component(self, name: str):
                 lname = name.lower()
 
-                from .ppo_hjb_rnn import PPOHjbRNN, PPOHjbRNN_default_config
                 from .recurrent_models import (
                     FeedForwardDeterministicValue,
                     RecurrentGaussianPolicy,
                 )
                 custom_components = {
-                    "ppohjbrnn": PPOHjbRNN,
-                    "ppohjbrnn_default_config": PPOHjbRNN_default_config,
                     "recurrentgaussianpolicy": RecurrentGaussianPolicy,
                     "feedforwarddeterministicvalue": FeedForwardDeterministicValue,
                 }
@@ -61,7 +58,7 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                 cfg = cast(dict[str, Any], copy.deepcopy(cfg))
                 agent_class_name = cfg.get("agent", {}).get("class", "")
 
-                standard_agents = ["a2c", "amp", "cem", "ddpg", "ddqn", "dqn", "ppo", "rpo", "sac", "td3", "trpo"]
+                standard_agents = ["a2c", "amp", "cem", "ddpg", "ddqn", "dqn", "ppo", "ppo_rnn", "rpo", "sac", "td3", "trpo"]
                 if agent_class_name.lower() in standard_agents:
                     return super()._generate_agent(env, cfg, models)
 

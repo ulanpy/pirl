@@ -1,0 +1,59 @@
+seed: 669
+
+models:
+  separate: True
+  policy:
+    class: RecurrentGaussianPolicy
+    clip_actions: False
+    clip_log_std: True
+    min_log_std: -20.0
+    max_log_std: 2.0
+    initial_log_std: -0.6
+    sequence_length: 64
+    transformer_model_dim: 128
+    transformer_num_heads: 4
+    transformer_num_layers: 2
+    transformer_context_len: 32
+    transformer_ff_dim: 512
+    aux_dim: 8
+  value:
+    class: FeedForwardDeterministicValue
+    clip_actions: False
+
+memory:
+  class: RandomMemory
+  memory_size: -1
+
+agent:
+  class: PPO_RNN
+  rollouts: 256
+  learning_epochs: 6
+  mini_batches: 8
+  discount_factor: 0.99
+  gae_lambda: 0.95
+  learning_rate: 3.0e-04
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.02
+  observation_preprocessor: RunningStandardScaler
+  observation_preprocessor_kwargs: null
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs: null
+  random_timesteps: 0
+  learning_starts: 0
+  grad_norm_clip: 1.0
+  ratio_clip: 0.2
+  value_clip: 0.2
+  entropy_loss_scale: 0.1
+  value_loss_scale: 2.0
+  kl_threshold: 0.0
+  time_limit_bootstrap: False
+  experiment:
+    directory: "burger_direct"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+trainer:
+  class: SequentialTrainer
+  timesteps: 100000

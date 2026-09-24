@@ -35,10 +35,10 @@ parser.add_argument("--task", type=str, default="burger", help="Name of the task
 parser.add_argument(
     "--agent",
     type=str,
-    default="skrl_ppo_aux_cfg_entry_point",
+    default="skrl_ppo_rnn_cfg_entry_point",
     help=(
         "RL agent configuration entry point. Must match the config used during training "
-        "(burger checkpoints are trained with skrl_ppo_aux_cfg_entry_point)."
+        "(burger checkpoints are trained with skrl_ppo_rnn_cfg_entry_point)."
     ),
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")

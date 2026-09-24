@@ -239,8 +239,8 @@ class PirlEnv(DirectRLEnv):
             # r_core = w1*(s_t - s_{t-1}) - w2*d_path + w3*cos(delta_heading)
             delta_s = self.curr_path_s - self.prev_path_s
             progress_val = delta_s * float(self.cfg.rew_scale_progress)
-            # Quadratic cross-track penalty: shape matches HJB running-cost term w_d * d^2,
-            # and removes the "drive parallel at fixed offset" exploit where a linear
+            # Quadratic cross-track penalty removes the "drive parallel at fixed offset"
+            # exploit where a linear
             # penalty is dominated by +progress + heading bonuses for small, sustained d.
             cte_val = -(self.curr_path_error ** 2) * float(self.cfg.rew_scale_path_error)
             forward_speed = self.robot.data.root_com_lin_vel_b[:, 0].unsqueeze(-1)
