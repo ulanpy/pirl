@@ -43,13 +43,10 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Nav2 InflationLayer defaults: inflation_radius=0.55, cost_scaling_factor=10.0
     grid_inflation_radius_m = 0.55  # inflation radius (m); Nav2 default 0.55 (use ~0.15 for tighter inflation)
     grid_cost_scaling_factor = 10.0  # exponential decay; Nav2 default 10.0
-    grid_history_len = 3  # number of stacked costmaps (temporal context: CNN sees last K frames as channels)
-    # Push a new frame into history every N env steps so that K frames span ~1 s (at 60 env Hz: 4*15=60 steps)
-    grid_history_interval_steps = 4
     grid_normalize = True  # normalize costs for RL input
-    # ObservationSchemaV2: each history frame becomes [cost, known_mask].
-    grid_channels_per_frame = 2
-    grid_observation_channels = grid_history_len * grid_channels_per_frame
+    # ObservationSchemaV2: current costmap [cost, known_mask]. Temporal context is policy state.
+    grid_channels = 2
+    grid_observation_channels = grid_channels
     # --- Local path observation ---
     # Path is generated once at reset (no replanning inside episode).
     # Controller/reward both use nearest-point anchor on the unconsumed suffix (monotonic prune).

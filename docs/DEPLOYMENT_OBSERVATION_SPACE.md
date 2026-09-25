@@ -9,7 +9,7 @@ ONNX policy принимает:
 
 ```text
 vec:       float32[1, 35]
-costmap:   float32[1, 6, 100, 100]
+costmap:   float32[1, 2, 100, 100]
 rnn_state: float32[1, 1, 256]
 ```
 
@@ -41,12 +41,11 @@ rnn_state_out: float32[1, 1, 256]
 rnn_state = zeros[1, 1, 256]
 prev_action = zeros[2]
 prev_reward_components = zeros[5]
-costmap_history = unknown frames
 ```
 
 На каждом control tick:
 
-1. Собрать `costmap[6,100,100]`.
+1. Собрать текущий `costmap[2,100,100]`.
 2. Собрать `vec[35]`.
 3. Вызвать ONNX.
 4. Сохранить `rnn_state_out` как следующий `rnn_state`.
@@ -58,7 +57,7 @@ costmap_history = unknown frames
 Форма:
 
 ```text
-costmap = float32[6, 100, 100]
+costmap = float32[2, 100, 100]
 ```
 
 Физический размер:
@@ -67,10 +66,9 @@ costmap = float32[6, 100, 100]
 rolling window: 5.0 m x 5.0 m
 resolution:     0.05 m/cell
 grid:           100 x 100
-history:        3 frames
 ```
 
-Каждый history frame кодируется двумя каналами:
+Текущий costmap кодируется двумя каналами:
 
 ```text
 cost       = 0.0 if unknown, otherwise nav2_cost / 254.0
@@ -80,12 +78,8 @@ known_mask = 0.0 if unknown, otherwise 1.0
 Порядок каналов:
 
 ```text
-0: newest_cost
-1: newest_known_mask
-2: previous_cost
-3: previous_known_mask
-4: oldest_cost
-5: oldest_known_mask
+0: cost
+1: known_mask
 ```
 
 Nav2 cost values:
@@ -113,7 +107,7 @@ float known_mask(uint8_t nav2_cost) {
 }
 ```
 
-На reset history заполняется unknown, то есть все `cost=0`, все `known_mask=0`.
+На reset текущий costmap заполняется unknown, то есть все `cost=0`, все `known_mask=0`.
 
 ## Vec Tensor
 
@@ -237,7 +231,6 @@ struct PirlRuntimeState {
   float rnn_state[1][1][256] = {};
   float prev_action[2] = {};
   float prev_reward_components[5] = {};
-  CostmapHistory history;
 };
 
 Observation build_observation(
@@ -247,7 +240,7 @@ Observation build_observation(
     PirlRuntimeState& state) {
   Observation obs;
 
-  obs.costmap = encode_costmap_history(local_costmap, state.history);
+  obs.costmap = encode_costmap(local_costmap);
 
   PathAdapterResult path_result = adapt_path_to_base_link(path);
   obs.vec[0] = body_vx(odom);
@@ -300,8 +293,8 @@ cmd_vel.angular.z = mean[1] * 1.5f;
 ## Checklist
 
 - `vec` shape is exactly `[1, 35]`.
-- `costmap` shape is exactly `[1, 6, 100, 100]`.
-- Costmap channel order is `[cost, known_mask]` for newest, previous, oldest frames.
+- `costmap` shape is exactly `[1, 2, 100, 100]`.
+- Costmap channel order is `[cost, known_mask]` for the current frame.
 - Path window is 12 points in `base_link`, resampled at `0.10 m`.
 - `d_signed` and `heading_error` use the same path adapter as the rewarder.
 - `prev_action` is the previous normalized ONNX action, not physical `cmd_vel`.

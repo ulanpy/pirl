@@ -13,18 +13,11 @@ class LocalCostmapBuilder:
         self.grid_resolution = cfg.grid_resolution
         self.grid_width_cells = cfg.grid_width_cells
         self.grid_half_size = self.grid_size_m / 2.0
-        self.grid_history = torch.full(
-            (num_envs, cfg.grid_history_len, self.grid_width_cells, self.grid_width_cells),
+        self.current_grid = torch.full(
+            (num_envs, self.grid_width_cells, self.grid_width_cells),
             cfg.grid_unknown_cost,
             device=device,
         )
-        # (num_envs, grid_history_len, 3): world xy + yaw when each frame was captured
-        self._pose_history = torch.zeros(
-            (num_envs, cfg.grid_history_len, 3),
-            device=device,
-        )
-        self._history_interval = getattr(cfg, "grid_history_interval_steps", 1)
-        self._step_count = 0
         # Precompute grid cell centers (meters in base_link frame)
         centers_1d = (torch.arange(self.grid_width_cells, device=device) + 0.5) * self.grid_resolution
         centers_1d = centers_1d - self.grid_half_size
@@ -51,12 +44,9 @@ class LocalCostmapBuilder:
 
     def reset(self, env_ids):
         if env_ids is None:
-            self.grid_history[:] = self.cfg.grid_unknown_cost
-            self._pose_history.zero_()
+            self.current_grid[:] = self.cfg.grid_unknown_cost
         else:
-            self.grid_history[env_ids] = self.cfg.grid_unknown_cost
-            self._pose_history[env_ids] = 0.0
-        self._step_count = 0
+            self.current_grid[env_ids] = self.cfg.grid_unknown_cost
 
     def build(
         self,
@@ -64,9 +54,9 @@ class LocalCostmapBuilder:
         robot_pos_w: torch.Tensor | None = None,
         robot_yaw: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Build and return flattened costmap history for MLP-style consumers."""
-        grid_history_norm = self._build_grid_history(lidar_ranges_m, robot_pos_w, robot_yaw)
-        return grid_history_norm.reshape(self.num_envs, -1)
+        """Build and return the flattened current costmap for MLP-style consumers."""
+        grid_obs = self._build_grid(lidar_ranges_m, robot_pos_w, robot_yaw)
+        return grid_obs.reshape(self.num_envs, -1)
 
     def build_image(
         self,
@@ -75,51 +65,9 @@ class LocalCostmapBuilder:
         robot_yaw: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Build and return NCHW ObservationSchemaV2 costmap channels."""
-        return self._build_grid_history(lidar_ranges_m, robot_pos_w, robot_yaw)
+        return self._build_grid(lidar_ranges_m, robot_pos_w, robot_yaw)
 
-    def _warp_grid_to_current_frame(
-        self,
-        grid_past: torch.Tensor,
-        pos_past: torch.Tensor,
-        yaw_past: torch.Tensor,
-        pos_cur: torch.Tensor,
-        yaw_cur: torch.Tensor,
-    ) -> torch.Tensor:
-        """Warp grid_past (one env, H, W) from past body frame to current body frame.
-        grid_past: (H, W), pos/yaw past and cur: scalars or 0-dim.
-        Returns (H, W) in current frame.
-        """
-        # Current body cell centers (H*W, 2)
-        centers = self.grid_centers
-        x_b, y_b = centers[:, 0], centers[:, 1]
-        cos_c = torch.cos(yaw_cur).to(x_b.dtype)
-        sin_c = torch.sin(yaw_cur).to(x_b.dtype)
-        cos_p = torch.cos(yaw_past).to(x_b.dtype)
-        sin_p = torch.sin(yaw_past).to(x_b.dtype)
-        # Current body -> world
-        wx = cos_c * x_b - sin_c * y_b + pos_cur[0]
-        wy = sin_c * x_b + cos_c * y_b + pos_cur[1]
-        # World -> past body
-        dx = wx - pos_past[0]
-        dy = wy - pos_past[1]
-        x_old = cos_p * dx + sin_p * dy
-        y_old = -sin_p * dx + cos_p * dy
-        # Past body -> grid indices
-        col_f = (x_old + self.grid_half_size) / self.grid_resolution
-        row_f = (y_old + self.grid_half_size) / self.grid_resolution
-        in_bounds = (
-            (row_f >= 0)
-            & (row_f < self.grid_width_cells)
-            & (col_f >= 0)
-            & (col_f < self.grid_width_cells)
-        )
-        row = row_f.long().clamp(0, self.grid_width_cells - 1)
-        col = col_f.long().clamp(0, self.grid_width_cells - 1)
-        out_flat = grid_past[row, col].clone()
-        out_flat[~in_bounds] = self.cfg.grid_unknown_cost
-        return out_flat.reshape(self.grid_width_cells, self.grid_width_cells)
-
-    def _build_grid_history(
+    def _build_grid(
         self,
         lidar_ranges_m: torch.Tensor,
         robot_pos_w: torch.Tensor | None = None,
@@ -196,17 +144,8 @@ class LocalCostmapBuilder:
                     grid[env_idx],
                 )
 
-        # Update history buffer only every N steps so that grid_history_len frames span ~1 s
-        if self._step_count % self._history_interval == 0:
-            self.grid_history = torch.roll(self.grid_history, shifts=1, dims=1)
-            self.grid_history[:, 0] = grid
-            if robot_pos_w is not None and robot_yaw is not None:
-                self._pose_history = torch.roll(self._pose_history, shifts=1, dims=1)
-                self._pose_history[:, 0, :2] = robot_pos_w
-                y = robot_yaw.squeeze(-1) if robot_yaw.dim() > 1 else robot_yaw
-                self._pose_history[:, 0, 2] = y
-        self._step_count += 1
-        grid_obs = self.grid_history
+        self.current_grid.copy_(grid)
+        grid_obs = self.current_grid
         if self.cfg.grid_normalize:
             known_mask = (grid_obs != self.cfg.grid_unknown_cost).float()
             cost = torch.where(
@@ -214,17 +153,12 @@ class LocalCostmapBuilder:
                 grid_obs / self.cfg.grid_lethal_cost,
                 torch.tensor(0.0, device=self.device),
             )
-            grid_obs = torch.stack((cost, known_mask), dim=2).reshape(
-                self.num_envs,
-                self.cfg.grid_history_len * self.cfg.grid_channels_per_frame,
-                self.grid_width_cells,
-                self.grid_width_cells,
-            )
+            grid_obs = torch.stack((cost, known_mask), dim=1)
         return grid_obs
 
     def get_danger_score(self) -> torch.Tensor:
         """Return max normalized cost in the current grid (excluding unknown)."""
-        grid = self.grid_history[:, 0]
+        grid = self.current_grid
         valid = grid != self.cfg.grid_unknown_cost
         if torch.any(valid):
             norm = grid / self.cfg.grid_lethal_cost
@@ -235,7 +169,7 @@ class LocalCostmapBuilder:
 
     def get_unknown_ratio_rear(self) -> torch.Tensor:
         """Return ratio of unknown cells in the rear half of the grid."""
-        grid = self.grid_history[:, 0]
+        grid = self.current_grid
         rear_mask = self.rear_mask.to(self.device)
         unknown = (grid == self.cfg.grid_unknown_cost) & rear_mask
         ratio = unknown.sum(dim=(1, 2)) / float(self.rear_count)

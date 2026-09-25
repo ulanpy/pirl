@@ -35,10 +35,8 @@ def main() -> None:
         grid_unknown_cost=255.0,
         grid_inflation_radius_m=0.55,
         grid_cost_scaling_factor=10.0,
-        grid_history_len=3,
-        grid_history_interval_steps=4,
         grid_normalize=True,
-        grid_channels_per_frame=2,
+        grid_channels=2,
         path_segment_len=12,
         reward_component_dim=5,
         lidar_num_rays=360,
@@ -52,7 +50,7 @@ def main() -> None:
         + cfg.reward_component_dim
     )
     expected_costmap_shape = (
-        cfg.grid_history_len * cfg.grid_channels_per_frame,
+        cfg.grid_channels,
         cfg.grid_width_cells,
         cfg.grid_width_cells,
     )

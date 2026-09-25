@@ -131,10 +131,10 @@ The physical ROS2 controller consumes exported ONNX policies, usually converted 
 
 Current deployment-facing actor inputs (ObservationSchemaV2.1) are:
 
-- `vec`: `[1, 68]` — ego (2) + tracking (2) + path window (24) + LiDAR sectors (32) + memory (8)  
+- `vec`: `[1, 35]` — ego (2) + tracking (2) + path window (24) + memory (7)
   *(batch=1)*
-- `costmap`: `[1, 6, 100, 100]`  
-  *(batch=1, 6 channels, 100×100 grid)*
+- `costmap`: `[1, 2, 100, 100]`
+  *(batch=1, cost + known-mask channels, 100×100 grid)*
 - `rnn_state`: `[1, 1, 256]`  
   *(batch=1, layers=1, hidden=256)*
 

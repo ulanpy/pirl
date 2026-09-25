@@ -375,7 +375,7 @@ class PirlEnv(DirectRLEnv):
         
         # Reset sensors
         self.lidar.reset(env_ids_seq)
-        # Reset grid history
+        # Reset current costmap
         self.costmap.reset(env_ids_seq)
         # Reset path points (dynamic-only setup: no static obstacle constraints).
         env_origins = self.scene.env_origins[env_ids_t, :2]
