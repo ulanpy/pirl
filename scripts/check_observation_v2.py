@@ -38,7 +38,9 @@ def main() -> None:
         grid_normalize=True,
         grid_channels=2,
         path_segment_len=12,
-        reward_component_dim=5,
+        reward_component_dim=4,
+        lidar_horizontal_fov_range=(-180.0, 180.0),
+        lidar_horizontal_res=1.0,
         lidar_num_rays=360,
         lidar=SimpleNamespace(max_distance=18.0),
     )

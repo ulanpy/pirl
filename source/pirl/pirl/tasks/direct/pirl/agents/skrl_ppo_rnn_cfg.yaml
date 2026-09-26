@@ -15,7 +15,7 @@ models:
     transformer_num_layers: 2
     transformer_context_len: 32
     transformer_ff_dim: 512
-    aux_dim: 8
+    aux_dim: 6
   value:
     class: FeedForwardDeterministicValue
     clip_actions: False
@@ -49,7 +49,7 @@ agent:
   kl_threshold: 0.0
   time_limit_bootstrap: False
   experiment:
-    directory: "burger_direct"
+    directory: "burger_manager"
     experiment_name: ""
     write_interval: auto
     checkpoint_interval: auto

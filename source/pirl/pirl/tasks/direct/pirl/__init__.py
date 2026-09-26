@@ -6,6 +6,7 @@
 import gymnasium as gym
 
 from . import agents
+from .manager_based import PirlManagerEnv, PirlManagerEnvCfg
 
 ##
 # Register Gym environments.
@@ -14,12 +15,11 @@ from . import agents
 
 gym.register(
     id="burger",
-    entry_point=f"{__name__}.pirl_env:PirlEnv",
+    entry_point=PirlManagerEnv,
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.pirl_env_cfg:PirlEnvCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "env_cfg_entry_point": PirlManagerEnvCfg,
         "skrl_ppo_rnn_cfg_entry_point": f"{agents.__name__}:skrl_ppo_rnn_cfg.yaml",
-
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_rnn_cfg.yaml",
     },
 )

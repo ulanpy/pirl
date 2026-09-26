@@ -10,8 +10,8 @@
 
 Реализация:
 - путь: `source/pirl/pirl/tasks/direct/pirl/pirl_env_path.py`
-- observation/reward: `source/pirl/pirl/tasks/direct/pirl/pirl_env.py`
-- параметры: `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py`
+- observation/reward: `source/pirl/pirl/tasks/direct/pirl/manager_based/mdp/`
+- параметры: `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py` (`PirlTaskCfg`)
 
 ## 2) Представление пути
 

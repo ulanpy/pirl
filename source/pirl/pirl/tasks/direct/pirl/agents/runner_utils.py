@@ -1,4 +1,5 @@
 import copy
+import dataclasses
 from typing import Any, Mapping, Union, cast
 
 from skrl.envs.wrappers.torch import MultiAgentEnvWrapper, Wrapper
@@ -32,9 +33,15 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                     FeedForwardDeterministicValue,
                     RecurrentGaussianPolicy,
                 )
+                # skrl 2.1 ships PPO_RNN, but its YAML Runner registry omits
+                # it.  PIRL's transformer policy exposes the RNN cache through
+                # this agent, so register the missing public component here.
+                from skrl.agents.torch.ppo import PPO_CFG, PPO_RNN
                 custom_components = {
                     "recurrentgaussianpolicy": RecurrentGaussianPolicy,
                     "feedforwarddeterministicvalue": FeedForwardDeterministicValue,
+                    "ppo_rnn": PPO_RNN,
+                    "ppo_rnn_default_config": dataclasses.asdict(PPO_CFG()),
                 }
                 if lname in custom_components:
                     return custom_components[lname]
@@ -58,7 +65,7 @@ def get_runner(env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
                 cfg = cast(dict[str, Any], copy.deepcopy(cfg))
                 agent_class_name = cfg.get("agent", {}).get("class", "")
 
-                standard_agents = ["a2c", "amp", "cem", "ddpg", "ddqn", "dqn", "ppo", "ppo_rnn", "rpo", "sac", "td3", "trpo"]
+                standard_agents = ["a2c", "amp", "cem", "ddpg", "ddqn", "dqn", "ppo", "rpo", "sac", "td3", "trpo"]
                 if agent_class_name.lower() in standard_agents:
                     return super()._generate_agent(env, cfg, models)
 

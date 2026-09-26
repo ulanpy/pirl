@@ -6,24 +6,18 @@
 from pirl.robots.burger import BURGER_CFG
 
 from isaaclab.assets import ArticulationCfg
-from isaaclab.envs import DirectRLEnvCfg
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 import isaaclab.sim as sim_utils
 from isaaclab.sensors import MultiMeshRayCasterCfg, patterns
 from isaaclab.markers.config import RAY_CASTER_MARKER_CFG
 import math
-import gymnasium as gym
-import numpy as np
 
 @configclass
-class PirlEnvCfg(DirectRLEnvCfg):
-    # env
+class PirlTaskCfg:
+    """Task constants shared by the manager-based PIRL environment and MDP terms."""
+
     decimation = 2
     episode_length_s = 15.0
-    # - spaces definition
-    action_space = 2
     # Burger LDS works with full 360-degree visibility.
     lidar_horizontal_fov_range = (-180.0, 180.0)
     lidar_horizontal_res = 1.0
@@ -62,7 +56,6 @@ class PirlEnvCfg(DirectRLEnvCfg):
         "progress",
         "path_error",
         "heading",
-        "proximity",
         "collision",
     )
     reward_component_dim = len(reward_component_names)
@@ -70,28 +63,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Curvature (ROS2-like local path: not a straight line).
     path_heading_noise_scale = 0.35  # rad per step; larger → more turns
     path_mid_turn_rad = 0.5  # extra turn in second half of path (rad), ±random
-    observation_space = gym.spaces.Dict(
-        {
-            "vec": gym.spaces.Box(
-                low=-np.inf,
-                high=np.inf,
-                shape=(
-                    2 + 2 + (path_segment_len * 2) + 2 + reward_component_dim,
-                ),
-                dtype=np.float32,
-            ),
-            "costmap": gym.spaces.Box(
-                low=0.0,
-                high=1.0,
-                shape=(grid_observation_channels, grid_width_cells, grid_width_cells),
-                dtype=np.float32,
-            ),
-        }
-    )
-    state_space = 0
-
-    # simulation
-    sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
+    physics_dt = 1 / 120
     # ground friction
     ground_static_friction = 0.7
     ground_dynamic_friction = 0.7
@@ -117,13 +89,13 @@ class PirlEnvCfg(DirectRLEnvCfg):
     dyn_obstacle_z_world = 0.5               # cylinder centre height, m (= height/2 above ground)
 
     # robot(s)
-    robot_cfg: ArticulationCfg = BURGER_CFG.replace(
+    robot_cfg: ArticulationCfg = BURGER_CFG.replace(  # type: ignore[attr-defined]
         prim_path="/World/envs/env_.*/Robot",
     )
     robot_cfg.init_state.pos = (0.0, 0.0, 0.02)
     
     # sensors
-    # The ground plane is a required raycast target; dynamic obstacle targets are appended by PirlEnv.
+    # The manager scene adds its global ground plane and obstacle collection as raycast targets.
     lidar = MultiMeshRayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base_scan",
         # Use base_scan pose from URDF directly.
@@ -145,7 +117,7 @@ class PirlEnvCfg(DirectRLEnvCfg):
         # Slightly above real range to ease debugging
         max_distance=18.0,
         debug_vis=False,
-        visualizer_cfg=RAY_CASTER_MARKER_CFG.replace(
+        visualizer_cfg=RAY_CASTER_MARKER_CFG.replace(  # type: ignore[attr-defined]
             prim_path="/Visuals/LidarHits",
             markers={
                 "hit": sim_utils.SphereCfg(
@@ -155,9 +127,6 @@ class PirlEnvCfg(DirectRLEnvCfg):
             },
         ),
     )
-
-    # Multi-env scene; dynamic obstacles are created under each env namespace.
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=50, env_spacing=35.0, replicate_physics=True)
 
     # controllable joints (explicit left/right order)
     dof_names = ["wheel_left_joint", "wheel_right_joint"]
@@ -180,14 +149,8 @@ class PirlEnvCfg(DirectRLEnvCfg):
     # Reference scale: at d=0.5 m penalty is -0.5^2 * 0.3 = -0.075/step (> progress 0.06);
     # at d=0.1 m it is -0.003/step (negligible, doesn't punish normal tracking noise).
     rew_scale_path_error = 0.3
-    # Extra safety shaping terms (proximity/collision) are enabled.
-    # Tuned to reduce "freezing" behavior near obstacles while preserving safety pressure.
     rew_scale_collision = -25.0
     collision_robot_radius = 0.14
-    proximity_activation_distance = 0.4  # m
-    proximity_exponential_rate = 2.0
-    proximity_front_fov_deg = 360.0
-    rew_proximity_max_penalty = -0.15
     # Heading alignment coefficient (w3): reward adds w3 * cos(delta_heading) * forward_gate.
     # Gated by forward speed in _get_rewards(), so no bonus for "face path + reverse".
     rew_scale_heading = 0.05

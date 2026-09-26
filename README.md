@@ -75,12 +75,12 @@ python scripts/skrl/play.py \
 python scripts/skrl/train.py --task=burger
 ```
 
-Training takes ~1-2 hours on a RTX 4090. Logs go to `logs/skrl/burger_direct/`.
+Training takes ~1-2 hours on a RTX 4090. Logs go to `logs/skrl/burger_manager/`.
 
 ### 7. Monitor Training (TensorBoard, container)
 
 ```bash
-tensorboard --logdir logs/skrl/burger_direct --bind_all --port 6006
+tensorboard --logdir logs/skrl/burger_manager --bind_all --port 6006
 ```
 
 Open `http://localhost:6006` from the host if port 6006 is exposed in Docker. `--bind_all` listens on all interfaces (for access outside the container); do not combine it with `--host`.

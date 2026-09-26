@@ -19,8 +19,9 @@
   - `toOnnx.py` — Export policies to ONNX for deployment.
   - `check_observation_v2.py`, `random_agent.py`, `zero_agent.py` — Smoke tests.
 - **source/pirl/pirl/tasks/direct/pirl/** — Core environment implementation:
-  - `pirl_env.py` — Main task loop, LiDAR, rewards, dynamics.
-  - `pirl_env_cfg.py` — Configurable parameters (robot, scene, episode length).
+  - `manager_based/env.py` — Manager-based environment and shared navigation-state cache.
+  - `manager_based/env_cfg.py` — Declarative scene and MDP-term composition.
+  - `pirl_env_cfg.py` — Shared task constants (`PirlTaskCfg`).
   - `pirl_env_costmap.py` — Multi-channel costmap rendering.
 - **source/pirl/pirl/tasks/direct/pirl/agents/** — Policy and training:
   - `recurrent_models.py` — GRU policy and value networks.
@@ -70,7 +71,7 @@ Long training jobs should only be launched explicitly:
 python scripts/skrl/train.py --task=burger
 ```
 
-**Training flags:** `--livestream 1`, `--num_envs 8` (default 8), `--max_iterations 1000` (default 10000). Logs land in `logs/skrl/<task>_direct/TIMESTAMP_ppo_rnn_torch/`.
+**Training flags:** `--livestream 1`, `--num_envs 8` (default 8), `--max_iterations 1000` (default 10000). Logs land in `logs/skrl/burger_manager/TIMESTAMP_ppo_rnn_torch/`.
 
 **ONNX export:**
 
@@ -91,7 +92,7 @@ Requires **skrl 2.1+** (bundled with Isaac Lab; pinned again in `source/pirl/set
 
 ```mermaid
 flowchart LR
-  A[Isaac Sim Scene + Robot] --> B[pirl_env.py]
+  A[Isaac Sim Scene + Robot] --> B[ManagerBasedRLEnv]
   B --> C[LiDAR Ranges]
   B --> D[Path Manager]
   C --> E[pirl_env_costmap.py]
@@ -110,14 +111,14 @@ flowchart LR
 
 Data flow summary:
 
-1. `pirl_env.py` computes LiDAR ranges, local costmap, path projection, local path window, and geometric errors.
+1. `manager_based/env.py` refreshes LiDAR ranges, local costmap, path projection, local path window, and geometric errors once per simulation step.
 2. Observations are split into `vec` and `costmap` branches. SKRL flattens Dict observations in sorted key order,
    so the flat state order is `costmap` first, then `vec`.
 3. `RunningStandardScaler` normalizes the flat state during training. Its `running_mean` and `running_variance`
    are saved in full SKRL checkpoints.
 4. `RecurrentGaussianPolicy` outputs normalized linear/yaw actions and a recurrent hidden state. The environment
    maps normalized actions to differential-drive wheel velocity targets.
-5. Rewards combine path progress, path error, heading alignment, proximity/collision, time cost, and success bonus.
+5. Rewards combine path progress, path error, heading alignment, collision, time cost, and success bonus.
 
 ## Configuration
 
@@ -131,7 +132,7 @@ The physical ROS2 controller consumes exported ONNX policies, usually converted 
 
 Current deployment-facing actor inputs (ObservationSchemaV2.1) are:
 
-- `vec`: `[1, 35]` — ego (2) + tracking (2) + path window (24) + memory (7)
+- `vec`: `[1, 34]` — ego (2) + tracking (2) + path window (24) + memory (6)
   *(batch=1)*
 - `costmap`: `[1, 2, 100, 100]`
   *(batch=1, cost + known-mask channels, 100×100 grid)*
@@ -156,21 +157,25 @@ reimplement Python Dict flattening or scaler slicing.
 ## Development Principles
 
 **Keep changes focused and minimal:**
+
 - Scope edits to the behavior being changed; avoid broad refactors unless they reduce complexity.
 - Do not add generic guardrails, fallbacks, or boilerplate. Prefer explicit invariants and simple failure modes.
 - Add abstractions only when they remove real duplication or match an established local pattern.
 
 **Treat coupled systems as explicit contracts:**
+
 - Observation layout, action mapping, reward definitions, and deployment export are tightly coupled.
 - Changing one usually requires checking all others.
 - When updating policy inputs, policy architecture, recurrent state size, action scaling, or state normalization, update `scripts/toOnnx.py` in the same change. This includes `vec` layout, costmap shape, Dict flattening, scaler behavior, GRU size/layers, and mean_head.
 
 **Minimize maintenance overhead:**
+
 - Do not modify generated checkpoints or event files in place.
 - New exported artifacts are written only when explicitly requested.
 - Avoid launching multiple long Isaac Sim jobs simultaneously.
 
 **Prefer separation of concerns:**
+
 - ONNX exports should embed state normalization and flat ordering; the ROS2 C++ side should not reimplement Python Dict flattening or scaler logic.
 
 ## Validation
@@ -195,7 +200,8 @@ Use checks that fit the change. Smoke tests are optional: run them when they pro
 
 ## Key Files
 
-- `source/pirl/pirl/tasks/direct/pirl/pirl_env.py`
+- `source/pirl/pirl/tasks/direct/pirl/manager_based/env.py`
+- `source/pirl/pirl/tasks/direct/pirl/manager_based/env_cfg.py`
 - `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py`
 - `source/pirl/pirl/tasks/direct/pirl/pirl_env_costmap.py`
 - `source/pirl/pirl/tasks/direct/pirl/agents/recurrent_models.py`

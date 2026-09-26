@@ -117,6 +117,10 @@ class DynamicObstacles:
         scene._rigid_object_collections[collection_key] = collection  # noqa: SLF001
         self._collection = collection
 
+    def bind(self, collection: RigidObjectCollection) -> None:
+        """Use a collection created declaratively by ``InteractiveScene``."""
+        self._collection = collection
+
     # ------------------------------------------------------------------ reset
 
     def reset(self, env_ids: Sequence[int] | torch.Tensor, env_origins: torch.Tensor) -> None:
