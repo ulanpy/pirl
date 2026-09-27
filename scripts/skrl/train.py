@@ -159,7 +159,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 logger = logging.getLogger(__name__)
 
 import pirl.tasks  # noqa: F401
-from pirl.tasks.direct.pirl.agents.runner_utils import get_runner
+from pirl.tasks.navigation.pirl.agents.runner_utils import get_runner
 
 # config shortcuts
 if args_cli.agent is None:

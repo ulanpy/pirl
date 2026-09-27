@@ -10,7 +10,7 @@ def reset_navigation(env, env_ids: Sequence[int]) -> None:
     ids = torch.as_tensor(env_ids, device=env.device, dtype=torch.long)
     if ids.numel() == 0:
         return
-    cfg = env.task_cfg
+    cfg = env.navigation_cfg
     root = env.robot.data.default_root_state[ids].clone()
     root[:, :3] += env.scene.env_origins[ids]
     radius = float(cfg.robot_spawn_radius) * torch.sqrt(torch.rand(len(ids), device=env.device))

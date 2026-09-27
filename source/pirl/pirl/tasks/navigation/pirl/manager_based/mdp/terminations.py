@@ -9,9 +9,9 @@ def time_out(env) -> torch.Tensor:
 
 def collision(env) -> torch.Tensor:
     env.refresh_navigation_state()
-    return env._latest_lidar_ranges_m.min(dim=1).values < float(env.task_cfg.collision_robot_radius)
+    return env._latest_lidar_ranges_m.min(dim=1).values < float(env.reward_cfg.collision_robot_radius)
 
 
 def success(env) -> torch.Tensor:
     env.refresh_navigation_state()
-    return env.final_goal_dist.squeeze(-1) < float(env.task_cfg.path_goal_threshold)
+    return env.final_goal_dist.squeeze(-1) < float(env.navigation_cfg.path_goal_threshold)

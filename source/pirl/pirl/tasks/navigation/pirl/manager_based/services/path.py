@@ -5,15 +5,16 @@ import isaaclab.utils.math as math_utils
 
 
 class LocalPathManager:
-    def __init__(self, cfg, device: str, num_envs: int) -> None:
-        self.cfg = cfg
+    def __init__(self, scenario_cfg, observation_cfg, device: str, num_envs: int) -> None:
+        self.scenario_cfg = scenario_cfg
+        self.observation_cfg = observation_cfg
         self.device = device
         self.num_envs = num_envs
         self.path_points_w = torch.zeros(
-            (num_envs, cfg.path_num_points, 2), device=device
+            (num_envs, scenario_cfg.path_num_points, 2), device=device
         )
         # Cumulative arc-length coordinate s for each waypoint.
-        self.path_s = torch.zeros((num_envs, cfg.path_num_points), device=device)
+        self.path_s = torch.zeros((num_envs, scenario_cfg.path_num_points), device=device)
         self.path_idx = torch.zeros(num_envs, dtype=torch.long, device=device)
         # Fallback when robot is on top of waypoint (to_target ~ 0) so command stays non-zero
         self._last_command_w = torch.zeros((num_envs, 3), device=device)
@@ -34,12 +35,12 @@ class LocalPathManager:
 
     def _generate_path_for_env(self, origin_xy: torch.Tensor) -> torch.Tensor:
         """Step-by-step curved path generation without static obstacle constraints."""
-        k = self.cfg.path_num_points
-        step_len = float(getattr(self.cfg, "path_point_spacing_m", 0.05))
-        noise_scale = float(getattr(self.cfg, "path_heading_noise_scale", 0.35))
-        mid_turn = float(getattr(self.cfg, "path_mid_turn_rad", 0.5))
+        k = self.scenario_cfg.path_num_points
+        step_len = float(self.scenario_cfg.path_point_spacing_m)
+        noise_scale = float(self.scenario_cfg.path_heading_noise_scale)
+        mid_turn = float(self.scenario_cfg.path_mid_turn_rad)
 
-        angle_range = getattr(self.cfg, "path_angle_range", None)
+        angle_range = self.scenario_cfg.path_angle_range
         if angle_range is not None:
             a0, a1 = angle_range
             heading = float((torch.rand(1, device=self.device) * (a1 - a0) + a0).item())
@@ -76,14 +77,14 @@ class LocalPathManager:
         n = env_ids.shape[0]
         env_origins_sub = self._extract_env_origins_xy(env_ids, env_origins)
 
-        path_points = torch.zeros((n, self.cfg.path_num_points, 2), device=self.device)
+        path_points = torch.zeros((n, self.scenario_cfg.path_num_points, 2), device=self.device)
         for i in range(n):
             path_points[i] = self._generate_path_for_env(env_origins_sub[i])
 
         self.path_points_w[env_ids] = path_points
         seg = path_points[:, 1:, :] - path_points[:, :-1, :]
         seg_lens = torch.linalg.norm(seg, dim=-1)
-        path_s = torch.zeros((n, self.cfg.path_num_points), device=self.device)
+        path_s = torch.zeros((n, self.scenario_cfg.path_num_points), device=self.device)
         path_s[:, 1:] = torch.cumsum(seg_lens, dim=1)
         self.path_s[env_ids] = path_s
         self.path_idx[env_ids] = 0
@@ -103,7 +104,7 @@ class LocalPathManager:
         torch.Tensor,
         torch.Tensor,
     ]:
-        k = self.cfg.path_num_points
+        k = self.scenario_cfg.path_num_points
         all_idx = torch.arange(k, device=self.device).unsqueeze(0).expand(self.num_envs, -1)
         # Prune consumed prefix: nearest search only on points ahead of current progress index.
         valid = all_idx >= self.path_idx.unsqueeze(1)
@@ -157,7 +158,7 @@ class LocalPathManager:
         tangent = next_pts - prev_pts
         tangent_heading = torch.atan2(tangent[:, 1], tangent[:, 0]).unsqueeze(-1)
         # Heading target for reward: bearing to lookahead point taken as last point of local segment.
-        lookahead_idx = torch.clamp(curr_idx + (self.cfg.path_segment_len - 1), max=k - 1)
+        lookahead_idx = torch.clamp(curr_idx + (self.observation_cfg.path_segment_len - 1), max=k - 1)
         lookahead_pts = self.path_points_w[torch.arange(self.num_envs, device=self.device), lookahead_idx]
         lookahead_vec = lookahead_pts - robot_pos_w
         lookahead_heading = torch.atan2(lookahead_vec[:, 1], lookahead_vec[:, 0]).unsqueeze(-1)
@@ -175,9 +176,9 @@ class LocalPathManager:
         )
 
     def get_segment(self, robot_pos_w: torch.Tensor, robot_quat_w: torch.Tensor, curr_idx: torch.Tensor) -> torch.Tensor:
-        seg_len = self.cfg.path_segment_len
+        seg_len = self.observation_cfg.path_segment_len
         seg_indices = curr_idx.unsqueeze(1) + torch.arange(seg_len, device=self.device).unsqueeze(0)
-        seg_indices = torch.clamp(seg_indices, max=self.cfg.path_num_points - 1)
+        seg_indices = torch.clamp(seg_indices, max=self.scenario_cfg.path_num_points - 1)
         path_seg_w = self.path_points_w[torch.arange(self.num_envs, device=self.device).unsqueeze(1), seg_indices]
         rel_seg_w = path_seg_w - robot_pos_w.unsqueeze(1)
         rel_seg_w_3 = torch.zeros((self.num_envs, seg_len, 3), device=self.device)
@@ -194,8 +195,8 @@ class LocalPathManager:
         curr_s: torch.Tensor,
     ) -> torch.Tensor:
         """Return a fixed arc-length path window in base_link, matching a ROS2 adapter contract."""
-        seg_len = self.cfg.path_segment_len
-        spacing = float(self.cfg.path_point_spacing_m)
+        seg_len = self.observation_cfg.path_segment_len
+        spacing = float(self.scenario_cfg.path_point_spacing_m)
         offsets = torch.arange(seg_len, device=self.device, dtype=curr_s.dtype).unsqueeze(0) * spacing
         sample_s = curr_s + offsets
         last_s = self.path_s[:, -1:].expand_as(sample_s)
@@ -205,7 +206,7 @@ class LocalPathManager:
         for env_idx in range(self.num_envs):
             path_s = self.path_s[env_idx]
             path_points = self.path_points_w[env_idx]
-            upper = torch.searchsorted(path_s, sample_s[env_idx], right=False).clamp(1, self.cfg.path_num_points - 1)
+            upper = torch.searchsorted(path_s, sample_s[env_idx], right=False).clamp(1, self.scenario_cfg.path_num_points - 1)
             lower = upper - 1
             s0 = path_s[lower]
             s1 = path_s[upper]

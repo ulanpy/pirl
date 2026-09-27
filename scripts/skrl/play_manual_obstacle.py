@@ -107,7 +107,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import pirl.tasks  # noqa: F401
-from pirl.tasks.direct.pirl.agents.runner_utils import get_runner
+from pirl.tasks.navigation.pirl.agents.runner_utils import get_runner
 
 SKRL_VERSION = "2.1.0"
 if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
@@ -134,10 +134,10 @@ class ManualObstacleController:
         self.initial_yaw = float(yaw)
         self.speed = float(speed)
         self.yaw_speed = float(yaw_speed)
-        self.x_min = float(env_cfg.dyn_obstacle_xy_range[0][0])
-        self.x_max = float(env_cfg.dyn_obstacle_xy_range[0][1])
-        self.y_min = float(env_cfg.dyn_obstacle_xy_range[1][0])
-        self.y_max = float(env_cfg.dyn_obstacle_xy_range[1][1])
+        self.x_min = float(env_cfg.obstacles.xy_range[0][0])
+        self.x_max = float(env_cfg.obstacles.xy_range[0][1])
+        self.y_min = float(env_cfg.obstacles.xy_range[1][0])
+        self.y_max = float(env_cfg.obstacles.xy_range[1][1])
         self._pressed: set[carb.input.KeyboardInput] = set()
         self._sub = None
 
@@ -260,7 +260,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     raw_env = env.unwrapped
     if not hasattr(raw_env, "dyn_obstacles") or raw_env.dyn_obstacles is None:
         raise RuntimeError(
-            "Task has no dynamic obstacles enabled. Set dyn_obstacle_enabled=True in env cfg."
+            "Task has no dynamic-obstacle collection configured."
         )
     dyn = raw_env.dyn_obstacles
     env_id = int(args_cli.manual_env_id)

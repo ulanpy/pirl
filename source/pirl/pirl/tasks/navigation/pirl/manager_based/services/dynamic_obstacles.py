@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from typing import cast
 
 import torch
 
@@ -43,9 +44,9 @@ def build_collection_cfg(cfg) -> RigidObjectCollectionCfg:
     all envs via ``/World/envs/env_.*/DynObstacle_{i}``. Data shape from the
     resulting collection is ``(num_envs, slot_count)``.
     """
-    slot_count = int(cfg.dyn_obstacle_slot_count)
-    radius = float(cfg.dyn_obstacle_radius)
-    height = float(cfg.dyn_obstacle_height)
+    slot_count = int(cfg.slot_count)
+    radius = float(cfg.radius)
+    height = float(cfg.height)
 
     cylinder_spawn = sim_utils.CylinderCfg(
         radius=radius,
@@ -83,7 +84,7 @@ class DynamicObstacles:
         self.cfg = cfg
         self.device = device
         self.num_envs = int(num_envs)
-        self.slot_count = int(cfg.dyn_obstacle_slot_count)
+        self.slot_count = int(cfg.slot_count)
 
         shape = (self.num_envs, self.slot_count)
         self._active = torch.zeros(shape, dtype=torch.bool, device=device)
@@ -97,7 +98,7 @@ class DynamicObstacles:
         self._manual_xy = torch.zeros((*shape, 2), dtype=torch.float32, device=device)
         self._manual_yaw = torch.zeros(shape, dtype=torch.float32, device=device)
 
-        self._z_world = float(cfg.dyn_obstacle_z_world)
+        self._z_world = float(cfg.z_world)
         self._collection: RigidObjectCollection | None = None
 
         # Cached helper tensors.
@@ -114,7 +115,7 @@ class DynamicObstacles:
         """
         coll_cfg = build_collection_cfg(self.cfg)
         collection = RigidObjectCollection(coll_cfg)
-        scene._rigid_object_collections[collection_key] = collection  # noqa: SLF001
+        scene._rigid_object_collections[collection_key] = collection  # pyright: ignore[reportPrivateUsage]
         self._collection = collection
 
     def bind(self, collection: RigidObjectCollection) -> None:
@@ -135,7 +136,7 @@ class DynamicObstacles:
         if self._collection is None:
             raise RuntimeError("DynamicObstacles.attach(scene) must be called before reset.")
         if isinstance(env_ids, torch.Tensor):
-            env_ids_t = env_ids.to(device=self.device, dtype=torch.long)
+            env_ids_t = cast(torch.Tensor, env_ids).to(device=self.device, dtype=torch.long)
         else:
             env_ids_t = torch.as_tensor(list(env_ids), device=self.device, dtype=torch.long)
         n = int(env_ids_t.shape[0])
@@ -143,15 +144,15 @@ class DynamicObstacles:
             return
         S = self.slot_count
 
-        x_range = self.cfg.dyn_obstacle_xy_range[0]
-        y_range = self.cfg.dyn_obstacle_xy_range[1]
-        keepout = float(self.cfg.dyn_obstacle_keepout_radius)
-        min_sep = float(self.cfg.dyn_obstacle_min_separation)
-        min_cnt, max_cnt = self.cfg.dyn_obstacle_count_range
+        x_range = self.cfg.xy_range[0]
+        y_range = self.cfg.xy_range[1]
+        keepout = float(self.cfg.keepout_radius)
+        min_sep = float(self.cfg.min_separation)
+        min_cnt, max_cnt = self.cfg.count_range
         max_cnt = min(int(max_cnt), S)
         min_cnt = min(int(min_cnt), max_cnt)
-        r_min, r_max = self.cfg.dyn_obstacle_motion_radius_range
-        w_min, w_max = self.cfg.dyn_obstacle_motion_speed_range
+        r_min, r_max = self.cfg.motion_radius_range
+        w_min, w_max = self.cfg.motion_speed_range
         margin = float(r_max)
 
         sx0 = float(x_range[0]) + margin

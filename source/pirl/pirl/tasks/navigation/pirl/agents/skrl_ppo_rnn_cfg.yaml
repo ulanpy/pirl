@@ -56,4 +56,6 @@ agent:
 
 trainer:
   class: SequentialTrainer
-  timesteps: 100000
+  timesteps: 100000 # one RL step = num_envs * timesteps
+  # то есть при 50 envs количество RL steps = 100k * 50 = 5 million 
+  # Если задан флаг --max_iterations то timesteps = max_iterations * rollout_length

@@ -18,12 +18,12 @@
   - `play.py` — Playback trained policies interactively.
   - `toOnnx.py` — Export policies to ONNX for deployment.
   - `check_observation_v2.py`, `random_agent.py`, `zero_agent.py` — Smoke tests.
-- **source/pirl/pirl/tasks/direct/pirl/** — Core environment implementation:
+- **source/pirl/pirl/tasks/navigation/pirl/** — Core environment implementation:
   - `manager_based/env.py` — Manager-based environment and shared navigation-state cache.
   - `manager_based/env_cfg.py` — Declarative scene and MDP-term composition.
-  - `pirl_env_cfg.py` — Shared task constants (`PirlTaskCfg`).
-  - `pirl_env_costmap.py` — Multi-channel costmap rendering.
-- **source/pirl/pirl/tasks/direct/pirl/agents/** — Policy and training:
+  - `manager_based/task_cfg.py` — Shared task constants (`PirlTaskCfg`).
+  - `manager_based/services/` — Stateful costmap, path and obstacle services.
+- **source/pirl/pirl/tasks/navigation/pirl/agents/** — Policy and training:
   - `recurrent_models.py` — GRU policy and value networks.
   - `obs_layout.py` — Observation dict structure and flat-state ordering.
   - `skrl_ppo_rnn_cfg.yaml` — SKRL PPO-RNN hyperparameters.
@@ -71,7 +71,10 @@ Long training jobs should only be launched explicitly:
 python scripts/skrl/train.py --task=burger
 ```
 
-**Training flags:** `--livestream 1`, `--num_envs 8` (default 8), `--max_iterations 1000` (default 10000). Logs land in `logs/skrl/burger_manager/TIMESTAMP_ppo_rnn_torch/`.
+**Training flags:** `--livestream 1`, `--num_envs 8` (default 8). With `rollouts: 256`,
+`--max_iterations N` runs exactly `N` PPO rollout/update cycles and sets the progress total to
+`256 × N` vectorized timesteps. If omitted, the YAML default `trainer.timesteps: 100000` is used,
+which is about 390 PPO updates. Logs land in `logs/skrl/burger_manager/TIMESTAMP_ppo_rnn_torch/`.
 
 **ONNX export:**
 
@@ -95,7 +98,7 @@ flowchart LR
   A[Isaac Sim Scene + Robot] --> B[ManagerBasedRLEnv]
   B --> C[LiDAR Ranges]
   B --> D[Path Manager]
-  C --> E[pirl_env_costmap.py]
+  C --> E[Costmap service]
   D --> F[path segment, d, psi, commands]
   E --> G[costmap obs]
   F --> H[vec obs]
@@ -122,8 +125,9 @@ Data flow summary:
 
 ## Configuration
 
-- **Task/scene/rewards:** `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py`
-- **SKRL hyperparameters:** `source/pirl/pirl/tasks/direct/pirl/agents/skrl_ppo_rnn_cfg.yaml`
+- **Task/scene/rewards:** `PirlManagerEnvCfg.task` owns the shared `PirlTaskCfg` in
+  `source/pirl/pirl/tasks/navigation/pirl/manager_based/task_cfg.py`; scene and manager terms are composed from it.
+- **SKRL hyperparameters:** `source/pirl/pirl/tasks/navigation/pirl/agents/skrl_ppo_rnn_cfg.yaml`
 
 ## Deployment And ONNX
 
@@ -200,13 +204,13 @@ Use checks that fit the change. Smoke tests are optional: run them when they pro
 
 ## Key Files
 
-- `source/pirl/pirl/tasks/direct/pirl/manager_based/env.py`
-- `source/pirl/pirl/tasks/direct/pirl/manager_based/env_cfg.py`
-- `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py`
-- `source/pirl/pirl/tasks/direct/pirl/pirl_env_costmap.py`
-- `source/pirl/pirl/tasks/direct/pirl/agents/recurrent_models.py`
-- `source/pirl/pirl/tasks/direct/pirl/agents/obs_layout.py`
-- `source/pirl/pirl/tasks/direct/pirl/agents/skrl_ppo_rnn_cfg.yaml`
+- `source/pirl/pirl/tasks/navigation/pirl/manager_based/env.py`
+- `source/pirl/pirl/tasks/navigation/pirl/manager_based/env_cfg.py`
+- `source/pirl/pirl/tasks/navigation/pirl/manager_based/task_cfg.py`
+- `source/pirl/pirl/tasks/navigation/pirl/manager_based/services/`
+- `source/pirl/pirl/tasks/navigation/pirl/agents/recurrent_models.py`
+- `source/pirl/pirl/tasks/navigation/pirl/agents/obs_layout.py`
+- `source/pirl/pirl/tasks/navigation/pirl/agents/skrl_ppo_rnn_cfg.yaml`
 - `scripts/toOnnx.py`
 - `docs/DEPLOYMENT_OBSERVATION_SPACE.md`
 - `docs/pirl_path_contract_ros_like.md`

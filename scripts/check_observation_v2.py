@@ -14,9 +14,9 @@ import torch
 def _load_costmap_builder():
     module_path = (
         Path(__file__).resolve().parents[1]
-        / "source/pirl/pirl/tasks/direct/pirl/pirl_env_costmap.py"
+        / "source/pirl/pirl/tasks/navigation/pirl/manager_based/services/costmap.py"
     )
-    spec = importlib.util.spec_from_file_location("pirl_env_costmap_smoke", module_path)
+    spec = importlib.util.spec_from_file_location("pirl_costmap_smoke", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load module spec for {module_path}")
     module = importlib.util.module_from_spec(spec)

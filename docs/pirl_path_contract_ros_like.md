@@ -9,9 +9,9 @@
 - **Replanning отсутствует** в рамках эпизода: путь фиксирован до следующего `reset()`.
 
 Реализация:
-- путь: `source/pirl/pirl/tasks/direct/pirl/pirl_env_path.py`
-- observation/reward: `source/pirl/pirl/tasks/direct/pirl/manager_based/mdp/`
-- параметры: `source/pirl/pirl/tasks/direct/pirl/pirl_env_cfg.py` (`PirlTaskCfg`)
+- путь: `source/pirl/pirl/tasks/navigation/pirl/manager_based/services/path.py`
+- observation/reward: `source/pirl/pirl/tasks/navigation/pirl/manager_based/mdp/`
+- параметры пути: `source/pirl/pirl/tasks/navigation/pirl/manager_based/configs/navigation_cfg.py` (`NavigationScenarioCfg`); размер окна policy — `configs/observation_cfg.py` (`NavigationObservationCfg`)
 
 ## 2) Представление пути
 
@@ -74,9 +74,9 @@
 - `path_point_spacing_m`
 - `path_num_points = round(path_length_m / path_point_spacing_m) + 1`
 - `path_segment_len` (размер sliding window в точках)
-- `rew_scale_progress` (`w1`)
-- `rew_scale_path_error` (`w2`)
-- `rew_scale_heading` (`w3`)
+- `progress_scale` (`w1`)
+- `path_error_scale` (`w2`)
+- `heading_scale` (`w3`)
 
 ## 8) Практический смысл
 

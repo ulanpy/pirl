@@ -35,6 +35,13 @@ Relevant local sources:
 
 ```text
 manager_based/
+  configs/
+    control_cfg.py        # simulation timing and ground physics
+    robot_cfg.py          # Burger embodiment and action semantics
+    observation_cfg.py    # LiDAR/costmap/vector observation contract
+    navigation_cfg.py     # path and reset scenario distributions
+    obstacle_cfg.py       # obstacle pool and scenario distribution
+    reward_cfg.py         # objective profile and collision threshold
   env.py                  # small owner of scene assets and NavigationState
   env_cfg.py              # scene and manager-term composition
   mdp/

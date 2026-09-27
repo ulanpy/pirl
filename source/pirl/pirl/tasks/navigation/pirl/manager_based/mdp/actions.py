@@ -32,7 +32,7 @@ class DifferentialDriveAction(ActionTerm):
         super().__init__(cfg, env)
         asset = cast(Articulation, self._asset)
         self._env = cast(Any, env)
-        self._dof_idx, _ = asset.find_joints(self._env.task_cfg.dof_names)
+        self._dof_idx, _ = asset.find_joints(self._env.robot_cfg.dof_names)
         self._raw_actions = torch.zeros((env.num_envs, 2), device=env.device)
         self._processed_actions = torch.zeros_like(self._raw_actions)
         self.prev_actions = torch.zeros_like(self._raw_actions)
@@ -43,7 +43,7 @@ class DifferentialDriveAction(ActionTerm):
         self._processed_actions.copy_(torch.clamp(actions, -1.0, 1.0))
 
     def apply_actions(self) -> None:
-        cfg = self._env.task_cfg
+        cfg = self._env.robot_cfg
         v = self._processed_actions[:, 0] * float(cfg.max_lin_vel)
         w = self._processed_actions[:, 1] * float(cfg.max_ang_vel)
         targets = torch.stack(

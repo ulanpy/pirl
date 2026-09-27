@@ -1,31 +1,40 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import isaaclab.utils.math as math_utils
 from isaaclab.envs import ManagerBasedRLEnv
 
-from ..pirl_env_cfg import PirlTaskCfg
-from ..pirl_env_costmap import LocalCostmapBuilder
-from ..pirl_env_dyn_obstacles import DynamicObstacles
-from ..pirl_env_path import LocalPathManager
 from . import visuals
+from .services import DynamicObstacles, LocalCostmapBuilder, LocalPathManager
+
+if TYPE_CHECKING:
+    from .env_cfg import PirlManagerEnvCfg
 
 
 class PirlManagerEnv(ManagerBasedRLEnv):
     """Manager-based PIRL environment with one shared navigation-state refresh."""
 
-    def __init__(self, cfg, render_mode: str | None = None, **kwargs) -> None:
-        self.task_cfg = PirlTaskCfg()
+    def __init__(self, cfg: PirlManagerEnvCfg, render_mode: str | None = None, **kwargs) -> None:
+        self.control_cfg = cfg.control
+        self.robot_cfg = cfg.robot
+        self.observation_cfg = cfg.observation
+        self.navigation_cfg = cfg.navigation
+        self.obstacle_cfg = cfg.obstacles
+        self.reward_cfg = cfg.reward_profile
         self._state_step = -1
         super().__init__(cfg, render_mode, **kwargs)
 
     def load_managers(self) -> None:
         self.robot = self.scene["robot"]
         self.lidar = self.scene["lidar"]
-        self.dyn_obstacles = DynamicObstacles(self.task_cfg, self.device, self.num_envs)
+        self.dyn_obstacles = DynamicObstacles(self.obstacle_cfg, self.device, self.num_envs)
         self.dyn_obstacles.bind(self.scene["dyn_obstacles"])
-        self.costmap = LocalCostmapBuilder(self.task_cfg, self.device, self.num_envs)
-        self.path_manager = LocalPathManager(self.task_cfg, self.device, self.num_envs)
+        self.costmap = LocalCostmapBuilder(self.observation_cfg, self.device, self.num_envs)
+        self.path_manager = LocalPathManager(
+            self.navigation_cfg, self.observation_cfg, self.device, self.num_envs
+        )
         self.heading_markers = visuals.create_heading_markers()
         self.path_markers = visuals.create_path_markers()
         self.prev_path_s = torch.zeros((self.num_envs, 1), device=self.device)
@@ -35,7 +44,7 @@ class PirlManagerEnv(ManagerBasedRLEnv):
         self.path_heading_cos = torch.zeros_like(self.prev_path_s)
         self.final_goal_dist = torch.zeros_like(self.prev_path_s)
         self.prev_reward_components = torch.zeros(
-            (self.num_envs, int(self.task_cfg.reward_component_dim)), device=self.device
+            (self.num_envs, int(self.observation_cfg.reward_component_dim)), device=self.device
         )
         self.reward_components = torch.zeros_like(self.prev_reward_components)
         self._latest_lidar_ranges_m = None
@@ -65,15 +74,15 @@ class PirlManagerEnv(ManagerBasedRLEnv):
             heading_target,
             self.path_manager.path_points_w,
             self.path_manager.path_idx,
-            int(self.task_cfg.path_segment_len),
+            int(self.observation_cfg.path_segment_len),
         )
         self.final_goal_dist = torch.linalg.norm(self.path_manager.path_points_w[:, -1] - robot_pos, dim=-1, keepdim=True)
         hits = self.lidar.data.ray_hits_w
         starts = self.lidar._ray_starts_w
         ranges = torch.linalg.norm(hits - starts, dim=-1)
         self._latest_lidar_ranges_m = torch.where(
-            torch.isfinite(ranges), ranges, torch.full_like(ranges, float(self.task_cfg.lidar.max_distance))
-        ).clamp(max=float(self.task_cfg.lidar.max_distance))
+            torch.isfinite(ranges), ranges, torch.full_like(ranges, float(self.observation_cfg.lidar_max_distance))
+        ).clamp(max=float(self.observation_cfg.lidar_max_distance))
         self.current_costmap = self.costmap.build_image(self._latest_lidar_ranges_m, robot_pos, yaw)
         self._state_step = self._sim_step_counter
 
