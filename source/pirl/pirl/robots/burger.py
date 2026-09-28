@@ -39,8 +39,8 @@ BURGER_CFG = ArticulationCfg(
     actuators={
         "wheel_acts": ImplicitActuatorCfg(
             joint_names_expr=["wheel_left_joint", "wheel_right_joint"],
-            stiffness=0.0,
-            damping=100.0,
+            stiffness=0.0, # Kp=0 -> position-control disabled in torque = Kp(q_*-q) + Kd(q'_*-q')
+            damping=100.0, # velocty P controller like  
         ),
     },
 )
