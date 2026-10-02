@@ -23,7 +23,6 @@ def reset_navigation(env, env_ids: Sequence[int]) -> None:
     env.robot.write_root_state_to_sim(root, ids)
     env.dyn_obstacles.reset(ids, env.scene.env_origins)
     env.lidar.reset(ids.tolist())
-    env.costmap.reset(ids.tolist())
     env.path_manager.reset(ids.tolist(), env.scene.env_origins[ids, :2])
     points = env.path_manager.path_points_w[ids]
     pos = root[:, :2]

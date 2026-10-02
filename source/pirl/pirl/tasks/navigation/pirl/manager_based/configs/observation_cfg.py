@@ -16,16 +16,11 @@ class NavigationObservationCfg:
     lidar_horizontal_res: float = 1.0
     lidar_max_distance: float = 18.0
 
+    # Current-frame LiDAR hit map. It intentionally contains no Nav2
+    # inflation, free-space rasterization, or handcrafted traversal costs.
     grid_size_m: float = 5.0
     grid_resolution: float = 0.05
-    grid_free_cost: float = 0.0
-    grid_inscribed_cost: float = 253.0
-    grid_lethal_cost: float = 254.0
-    grid_unknown_cost: float = 255.0
-    grid_inflation_radius_m: float = 0.55
-    grid_cost_scaling_factor: float = 10.0
-    grid_normalize: bool = True
-    grid_channels: int = 2
+    grid_channels: int = 1
 
     path_segment_len: int = 12
     reward_component_names: tuple[str, ...] = ("progress", "path_error", "heading", "collision")

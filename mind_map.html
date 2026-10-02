@@ -1,0 +1,1174 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Autonomous Navigation Failure Taxonomy — Connected-style View</title>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: #f3f3f3;
+    color: #1f2933;
+  }
+  .app { display: grid; grid-template-rows: 74px 1fr; height: 100vh; }
+  .topbar {
+    display: grid; grid-template-columns: 260px 1fr 360px; align-items: center;
+    gap: 18px; padding: 10px 18px; background: #f7f7f7; border-bottom: 1px solid #d9d9d9;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 700; color: #2b5b80; }
+  .brand .logo { width: 22px; height: 22px; position: relative; }
+  .brand .dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #74b8b8; }
+  .brand .dot:nth-child(1) { left: 0; top: 7px; }
+  .brand .dot:nth-child(2) { right: 0; top: 0; }
+  .brand .dot:nth-child(3) { right: 2px; bottom: 0; }
+  .brand .line {
+    position: absolute; left: 6px; top: 9px; width: 10px; height: 1px;
+    background: #74b8b8; transform: rotate(-26deg); transform-origin: left center;
+  }
+  .brand .line2 {
+    position: absolute; left: 6px; top: 11px; width: 10px; height: 1px;
+    background: #74b8b8; transform: rotate(26deg); transform-origin: left center;
+  }
+  .searchwrap { display: flex; justify-content: center; }
+  .search {
+    width: min(760px, 100%); padding: 14px 18px; border-radius: 28px; border: 1px solid #d4d4d4;
+    background: white; outline: none; font-size: 15px; box-shadow: 0 1px 2px rgba(0,0,0,0.04) inset;
+  }
+  .toolbar { display: flex; justify-content: flex-end; gap: 12px; align-items: center; font-size: 14px; color: #56616d; }
+  .btn {
+    border: 1px solid #d4d4d4; background: white; color: #47515c; padding: 9px 12px;
+    border-radius: 22px; cursor: pointer; font-size: 13px;
+  }
+  .content { display: grid; grid-template-columns: 320px 1fr 360px; min-height: 0; }
+  .panel { background: #fafafa; border-right: 1px solid #ddd; overflow: auto; }
+  .rightpanel { border-right: none; border-left: 1px solid #ddd; background: #fafafa; }
+  .panel-title {
+    padding: 16px 16px 10px 16px; font-weight: 700; font-size: 15px; color: #27313b;
+    position: sticky; top: 0; background: #fafafa; border-bottom: 1px solid #e8e8e8; z-index: 2;
+  }
+  .subtle { color: #7a848d; font-size: 12px; font-weight: 500; }
+  .list-section { padding: 10px 0 0 0; }
+  .section-header {
+    padding: 6px 16px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8a9298;
+  }
+  .item { padding: 14px 16px; border-bottom: 1px solid #ececec; cursor: pointer; background: #fff; }
+  .item:hover { background: #f8fbfb; }
+  .item.active { background: #efe4ef; border-left: 4px solid #8b5c8d; padding-left: 12px; }
+  .item-title { font-size: 15px; line-height: 1.28; margin-bottom: 4px; color: #18222c; }
+  .item-meta { font-size: 13px; color: #778089; }
+  .graph-wrap { position: relative; min-width: 0; min-height: 0; background: #efefef; }
+  .graph-top-tabs {
+    position: absolute; left: 0; top: 0; right: 0; height: 44px; display: flex; align-items: center; justify-content: center;
+    gap: 32px; z-index: 5; background: rgba(245,245,245,0.94); border-bottom: 1px solid #dddddd; font-size: 15px;
+  }
+  .graph-tab {
+    appearance: none; border: 0; border-bottom: 2px solid transparent; padding: 12px 2px 10px;
+    background: transparent; color: #1f2933; cursor: pointer; font: inherit; line-height: 1;
+  }
+  .graph-tab:hover, .graph-tab:focus-visible { color: #2c5f8c; outline: none; }
+  .graph-tab:focus-visible { box-shadow: 0 0 0 3px rgba(44, 95, 140, .18); border-radius: 3px; }
+  .graph-tab.active-tab { color: #2c5f8c; border-bottom-color: #2c5f8c; font-weight: 600; }
+  #network { position: absolute; inset: 44px 0 0 0; }
+  .legend {
+    position: absolute; left: 12px; bottom: 12px; max-width: 250px; padding: 8px 10px; background: rgba(255,255,255,0.94);
+    border: 1px solid #dbdbdb; border-radius: 8px; font-size: 10.5px; line-height: 1.38; color: #66727e; z-index: 6;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.05);
+  }
+  .legend strong { color: #33414d; font-size: 11px; }
+  .legend-counts { margin-left: 5px; color: #8a9298; font-size: 10px; }
+  .legend-row { margin-top: 3px; }
+  .legend-colors { display: flex; flex-wrap: wrap; gap: 1px 8px; margin-top: 5px; }
+  .detail { padding: 18px 18px 26px 18px; }
+  .detail h2 { margin: 0 0 10px; line-height: 1.22; font-size: 22px; color: #101820; }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 16px; }
+  .pill { padding: 6px 10px; border-radius: 14px; background: white; border: 1px solid #dddddd; font-size: 12px; color: #616c75; }
+  .detail p { font-size: 15px; line-height: 1.58; color: #34414e; }
+  .link { display: inline-block; margin-top: 10px; color: #2c5f8c; text-decoration: none; font-weight: 600; }
+  .counts { padding: 14px 16px 4px; color: #7a848d; font-size: 12px; background: #fafafa; }
+  .core-intro { margin-bottom: 14px; }
+  .case-card {
+    margin: 12px 0; padding: 14px; background: #fff; border: 1px solid #e1e5e8;
+    border-left: 4px solid var(--branch, #7a848d); border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(22, 30, 38, 0.035);
+  }
+  .case-card h3 { margin: 0 0 7px; font-size: 16px; line-height: 1.3; color: #1c2833; }
+  .case-card > p { margin: 0 0 10px; font-size: 13px; line-height: 1.5; }
+  .case-fact { margin: 7px 0; font-size: 12.5px; line-height: 1.46; color: #4b5965; }
+  .case-fact strong { color: #273844; }
+  .evidence-heading { margin: 12px 0 5px; font-size: 12px; font-weight: 700; color: #56616d; }
+  .evidence-list { margin: 0; padding-left: 18px; }
+  .evidence-list li { margin: 7px 0; font-size: 12px; line-height: 1.4; color: #53616c; }
+  .evidence-list .link, .case-card .link { margin: 0; font-size: 12px; }
+  .evidence-note { color: #7a848d; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="line"></span><span class="line2"></span>
+      </div>
+      <span>CONNECTED-STYLE MAP</span>
+    </div>
+    <div class="searchwrap">
+      <input id="search" class="search" placeholder="Search for a topic, failure case, or paper..." />
+    </div>
+    <div class="toolbar">
+      <button class="btn" id="fitBtn">Fit graph</button>
+      <button class="btn" id="coresBtn">Only cores</button>
+      <button class="btn" id="allBtn">Show all</button>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="panel">
+      <div class="panel-title">Autonomous Navigation Failure Taxonomy<br><span class="subtle">Origin map · 7 cores · concrete cases · linked papers</span></div>
+      <div class="counts" id="listCounts"></div>
+      <div id="leftList"></div>
+    </div>
+
+    <div class="graph-wrap">
+      <div class="graph-top-tabs" role="toolbar" aria-label="Graph filters">
+        <button class="graph-tab" type="button" data-view="cores" aria-pressed="false">Core branches</button>
+        <button class="graph-tab" type="button" data-view="derivatives" aria-pressed="false">Derivative topics</button>
+        <button class="graph-tab" type="button" data-view="evidence" aria-pressed="false">Evidence papers</button>
+      </div>
+      <div id="network"></div>
+      <div class="legend">
+        <strong>Map key · calm palette</strong><span id="legendCounts" class="legend-counts"></span>
+        <div class="legend-row">Purple halo = selected · Color = branch</div>
+        <div class="legend-row">Large core · medium case · small evidence paper</div>
+        <div class="legend-row">Tabs filter the graph; click the active tab again for all.</div>
+        <div class="legend-colors">
+          <span><span style="color:#8877a4">●</span> Objective</span>
+          <span><span style="color:#5f91af">●</span> Perception</span>
+          <span><span style="color:#62999b">●</span> State</span>
+          <span><span style="color:#6e987d">●</span> Prediction</span>
+          <span><span style="color:#af925f">●</span> Planning</span>
+          <span><span style="color:#b77d6a">●</span> Control</span>
+          <span><span style="color:#a97487">●</span> Deployment</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel rightpanel">
+      <div class="panel-title">Details</div>
+      <div id="detail" class="detail"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const DATA = {"nodes": [{"id": "root", "label": "Autonomous Navigation\nFailures", "group": "root", "value": 70, "title": "Central taxonomy root"}, {"id": "core::Objective / Specification", "label": "Objective / Specification", "group": "core", "value": 44, "title": "Objective / Specification: 4 concrete failure cases"}, {"id": "case::Objective / Specification::Fixed cost-weight brittleness", "label": "Fixed cost-weight brittleness", "group": "case", "value": 24, "title": "Fixed weights in local-planner cost functions often break when the environment changes.", "description": "Fixed weights in local-planner cost functions often break when the environment changes."}, {"id": "paper::1", "label": "Dynamic Adaptive Dynamic Window Approach", "group": "paper", "value": 23, "title": "Dynamic Adaptive Dynamic Window Approach\nIEEE Transactions on Robotics, 2024", "paper_title": "Dynamic Adaptive Dynamic Window Approach", "venue": "IEEE Transactions on Robotics, 2024", "url": "https://doi.org/10.1109/TRO.2024.3400932"}, {"id": "case::Objective / Specification::Safety–efficiency trade-off", "label": "Safety–efficiency trade-off", "group": "case", "value": 24, "title": "Safety constraints can make the robot overly conservative; weaker constraints can reduce clearance.", "description": "Safety constraints can make the robot overly conservative; weaker constraints can reduce clearance."}, {"id": "paper::2", "label": "Social robot navigation through constrained optimization", "group": "paper", "value": 17, "title": "Social robot navigation through constrained optimization\nRobotics and Autonomous Systems, 2024", "paper_title": "Social robot navigation through constrained optimization", "venue": "Robotics and Autonomous Systems, 2024", "url": "https://doi.org/10.1016/j.robot.2024.104830"}, {"id": "case::Objective / Specification::Social compliance hard to encode", "label": "Social compliance hard to encode", "group": "case", "value": 24, "title": "Classical cost functions struggle to capture social comfort, efficiency, and safety together.", "description": "Classical cost functions struggle to capture social comfort, efficiency, and safety together."}, {"id": "paper::3", "label": "Rethinking Social Robot Navigation: Leveraging the Best of Two Worlds", "group": "paper", "value": 17, "title": "Rethinking Social Robot Navigation: Leveraging the Best of Two Worlds\nICRA, 2024", "paper_title": "Rethinking Social Robot Navigation: Leveraging the Best of Two Worlds", "venue": "ICRA, 2024", "url": "https://www.cs.utexas.edu/~pstone/Papers/bib2html/b2hd-karnansocial2024.html"}, {"id": "case::Objective / Specification::Missing / implicit social norms", "label": "Missing / implicit social norms", "group": "case", "value": 24, "title": "Collision-free motion does not automatically satisfy social spacing and human-aware conventions.", "description": "Collision-free motion does not automatically satisfy social spacing and human-aware conventions."}, {"id": "paper::4", "label": "Bridging Requirements, Planning, and Evaluation: A Review of Social Robot Navigation", "group": "paper", "value": 17, "title": "Bridging Requirements, Planning, and Evaluation: A Review of Social Robot Navigation\nSensors, 2024", "paper_title": "Bridging Requirements, Planning, and Evaluation: A Review of Social Robot Navigation", "venue": "Sensors, 2024", "url": "https://doi.org/10.3390/s24092794"}, {"id": "core::Perception", "label": "Perception", "group": "core", "value": 44, "title": "Perception: 4 concrete failure cases"}, {"id": "case::Perception::Limited onboard sensing / FoV", "label": "Limited onboard sensing / FoV", "group": "case", "value": 24, "title": "The robot only sees a local slice of the environment and may miss relevant agents outside its sensing horizon.", "description": "The robot only sees a local slice of the environment and may miss relevant agents outside its sensing horizon."}, {"id": "paper::5", "label": "CCTV-Informed Human-Aware Robot Navigation in Crowded Indoor Environments", "group": "paper", "value": 17, "title": "CCTV-Informed Human-Aware Robot Navigation in Crowded Indoor Environments\nIEEE RA-L, 2024", "paper_title": "CCTV-Informed Human-Aware Robot Navigation in Crowded Indoor Environments", "venue": "IEEE RA-L, 2024", "url": "https://doi.org/10.1109/LRA.2024.3396057"}, {"id": "case::Perception::Occluded / unseen dynamic agents", "label": "Occluded / unseen dynamic agents", "group": "case", "value": 24, "title": "Humans or obstacles hidden behind walls or other people create safety-critical blind spots.", "description": "Humans or obstacles hidden behind walls or other people create safety-critical blind spots."}, {"id": "paper::6", "label": "OA-MPC: Occlusion-Aware MPC for Guaranteed Safe Robot Navigation With Unseen Dynamic Obstacles", "group": "paper", "value": 17, "title": "OA-MPC: Occlusion-Aware MPC for Guaranteed Safe Robot Navigation With Unseen Dynamic Obstacles\nIEEE TCST, 2025", "paper_title": "OA-MPC: Occlusion-Aware MPC for Guaranteed Safe Robot Navigation With Unseen Dynamic Obstacles", "venue": "IEEE TCST, 2025", "url": "https://doi.org/10.1109/TCST.2024.3520462"}, {"id": "case::Perception::Lighting / sensor noise / detection limits", "label": "Lighting / sensor noise / detection limits", "group": "case", "value": 24, "title": "Real-time human detection remains sensitive to lighting, noise, and perceptual uncertainty.", "description": "Real-time human detection remains sensitive to lighting, noise, and perceptual uncertainty."}, {"id": "paper::7", "label": "Social Elastic Band with Prediction and Anticipation", "group": "paper", "value": 20, "title": "Social Elastic Band with Prediction and Anticipation\nInternational Journal of Social Robotics, 2024", "paper_title": "Social Elastic Band with Prediction and Anticipation", "venue": "International Journal of Social Robotics, 2024", "url": "https://doi.org/10.1007/s12369-024-01135-z"}, {"id": "case::Perception::Dynamic-object feature corruption", "label": "Dynamic-object feature corruption", "group": "case", "value": 24, "title": "Moving objects contaminate observed features and degrade downstream localization quality.", "description": "Moving objects contaminate observed features and degrade downstream localization quality."}, {"id": "paper::8", "label": "Dynamic detection and data association for visual SLAM", "group": "paper", "value": 17, "title": "Dynamic detection and data association for visual SLAM\nDisplays, 2024", "paper_title": "Dynamic detection and data association for visual SLAM", "venue": "Displays, 2024", "url": "https://doi.org/10.1016/j.displa.2024.102663"}, {"id": "core::State Estimation / Mapping", "label": "State Estimation / Mapping", "group": "core", "value": 44, "title": "State Estimation / Mapping: 4 concrete failure cases"}, {"id": "case::State Estimation / Mapping::False data association", "label": "False data association", "group": "case", "value": 24, "title": "The system matches an observation to the wrong landmark or map element.", "description": "The system matches an observation to the wrong landmark or map element."}, {"id": "paper::9", "label": "Adaptive robot localization in dynamic environments", "group": "paper", "value": 17, "title": "Adaptive robot localization in dynamic environments\nRobotics and Autonomous Systems, 2024", "paper_title": "Adaptive robot localization in dynamic environments", "venue": "Robotics and Autonomous Systems, 2024", "url": "https://doi.org/10.1016/j.robot.2024.104786"}, {"id": "case::State Estimation / Mapping::Map ageing / environment change", "label": "Map ageing / environment change", "group": "case", "value": 24, "title": "Maps become stale when furniture, people, or layout details change over time.", "description": "Maps become stale when furniture, people, or layout details change over time."}, {"id": "paper::10", "label": "Real-Time Submap Trimming-Based Map Updating", "group": "paper", "value": 17, "title": "Real-Time Submap Trimming-Based Map Updating\nIEEE TII, 2024", "paper_title": "Real-Time Submap Trimming-Based Map Updating", "venue": "IEEE TII, 2024", "url": "https://doi.org/10.1109/TII.2024.3413958"}, {"id": "case::State Estimation / Mapping::Tracking loss from dynamic points", "label": "Tracking loss from dynamic points", "group": "case", "value": 24, "title": "Too many dynamic points can increase matching error and cause tracking failure.", "description": "Too many dynamic points can increase matching error and cause tracking failure."}, {"id": "paper::11", "label": "YVG-SLAM", "group": "paper", "value": 17, "title": "YVG-SLAM\nIEEJ Transactions, 2024", "paper_title": "YVG-SLAM", "venue": "IEEJ Transactions, 2024", "url": "https://doi.org/10.1002/tee.24004"}, {"id": "case::State Estimation / Mapping::Ignoring temporal map patterns", "label": "Ignoring temporal map patterns", "group": "case", "value": 24, "title": "Long-term navigation benefits from modeling recurring changes instead of assuming a static map.", "description": "Long-term navigation benefits from modeling recurring changes instead of assuming a static map."}, {"id": "paper::12", "label": "Long-term navigation based on spatio-temporal map prediction", "group": "paper", "value": 17, "title": "Long-term navigation based on spatio-temporal map prediction\nRobotics and Autonomous Systems, 2024", "paper_title": "Long-term navigation based on spatio-temporal map prediction", "venue": "Robotics and Autonomous Systems, 2024", "url": "https://doi.org/10.1016/j.robot.2024.104724"}, {"id": "core::Prediction / Interaction Model", "label": "Prediction / Interaction Model", "group": "core", "value": 44, "title": "Prediction / Interaction Model: 4 concrete failure cases"}, {"id": "case::Prediction / Interaction Model::Multimodal human motion", "label": "Multimodal human motion", "group": "case", "value": 24, "title": "A person may plausibly go left, right, stop, or accelerate; single-mode prediction loses that ambiguity.", "description": "A person may plausibly go left, right, stop, or accelerate; single-mode prediction loses that ambiguity."}, {"id": "paper::13", "label": "End-to-end pedestrian trajectory prediction via Efficient Multi-modal Predictors", "group": "paper", "value": 17, "title": "End-to-end pedestrian trajectory prediction via Efficient Multi-modal Predictors\nCVIU, 2024", "paper_title": "End-to-end pedestrian trajectory prediction via Efficient Multi-modal Predictors", "venue": "CVIU, 2024", "url": "https://doi.org/10.1016/j.cviu.2024.104107"}, {"id": "case::Prediction / Interaction Model::Long-horizon uncertainty growth", "label": "Long-horizon uncertainty growth", "group": "case", "value": 24, "title": "Prediction becomes less reliable as the horizon grows.", "description": "Prediction becomes less reliable as the horizon grows."}, {"id": "paper::14", "label": "Graph network-based human movement prediction for socially-aware robot navigation", "group": "paper", "value": 17, "title": "Graph network-based human movement prediction for socially-aware robot navigation\nNeural Computing and Applications, 2024", "paper_title": "Graph network-based human movement prediction for socially-aware robot navigation", "venue": "Neural Computing and Applications, 2024", "url": "https://doi.org/10.1007/s00521-024-10369-x"}, {"id": "case::Prediction / Interaction Model::Occlusion-state forgetting", "label": "Occlusion-state forgetting", "group": "case", "value": 24, "title": "After an agent disappears from view, the system must maintain uncertainty rather than forgetting it.", "description": "After an agent disappears from view, the system must maintain uncertainty rather than forgetting it."}, {"id": "paper::15", "label": "Navigation under uncertainty: trajectory prediction and occlusion reasoning", "group": "paper", "value": 20, "title": "Navigation under uncertainty: trajectory prediction and occlusion reasoning\narXiv, 2024", "paper_title": "Navigation under uncertainty: trajectory prediction and occlusion reasoning", "venue": "arXiv, 2024", "url": "https://arxiv.org/abs/2410.10653"}, {"id": "case::Prediction / Interaction Model::Interaction model mismatch", "label": "Interaction model mismatch", "group": "case", "value": 24, "title": "Oversimplified interaction assumptions do not adapt fast enough to changing crowd dynamics.", "description": "Oversimplified interaction assumptions do not adapt fast enough to changing crowd dynamics."}, {"id": "paper::16", "label": "DERGCN: Dynamic-Evolving graph convolutional networks for human trajectory prediction", "group": "paper", "value": 17, "title": "DERGCN: Dynamic-Evolving graph convolutional networks for human trajectory prediction\nNeurocomputing, 2024", "paper_title": "DERGCN: Dynamic-Evolving graph convolutional networks for human trajectory prediction", "venue": "Neurocomputing, 2024", "url": "https://doi.org/10.1016/j.neucom.2023.127117"}, {"id": "core::Planning / Optimization", "label": "Planning / Optimization", "group": "core", "value": 44, "title": "Planning / Optimization: 4 concrete failure cases"}, {"id": "case::Planning / Optimization::Frozen robot problem", "label": "Frozen robot problem", "group": "case", "value": 24, "title": "The planner becomes so conservative that the robot stops progressing.", "description": "The planner becomes so conservative that the robot stops progressing."}, {"id": "paper::17", "label": "Look Before You Leap", "group": "paper", "value": 17, "title": "Look Before You Leap\nIROS, 2024", "paper_title": "Look Before You Leap", "venue": "IROS, 2024", "url": "https://doi.org/10.1109/IROS58592.2024.10801967"}, {"id": "case::Planning / Optimization::Static DWA / dynamic-obstacle weakness", "label": "Static DWA / dynamic-obstacle weakness", "group": "case", "value": 24, "title": "Classical DWA remains brittle under dynamic obstacles and sensitive to parameter settings.", "description": "Classical DWA remains brittle under dynamic obstacles and sensitive to parameter settings."}, {"id": "case::Planning / Optimization::Reactive rather than anticipatory planning", "label": "Reactive rather than anticipatory planning", "group": "case", "value": 24, "title": "The planner reacts to where people are now instead of anticipating where they will go.", "description": "The planner reacts to where people are now instead of anticipating where they will go."}, {"id": "case::Planning / Optimization::Aggressive vs cautious local planning", "label": "Aggressive vs cautious local planning", "group": "case", "value": 24, "title": "The controller must balance speed, clearance, and feasibility without being reckless or overly timid.", "description": "The controller must balance speed, clearance, and feasibility without being reckless or overly timid."}, {"id": "paper::18", "label": "Optimization-based local planner for a nonholonomic autonomous mobile robot", "group": "paper", "value": 17, "title": "Optimization-based local planner for a nonholonomic autonomous mobile robot\nRobotics and Autonomous Systems, 2024", "paper_title": "Optimization-based local planner for a nonholonomic autonomous mobile robot", "venue": "Robotics and Autonomous Systems, 2024", "url": "https://doi.org/10.1016/j.robot.2023.104565"}, {"id": "core::Control / Execution", "label": "Control / Execution", "group": "core", "value": 44, "title": "Control / Execution: 4 concrete failure cases"}, {"id": "case::Control / Execution::Wheel slip", "label": "Wheel slip", "group": "case", "value": 24, "title": "The executed motion deviates because of longitudinal or lateral wheel slip.", "description": "The executed motion deviates because of longitudinal or lateral wheel slip."}, {"id": "paper::19", "label": "Adaptive robust control with slipping parameters estimation", "group": "paper", "value": 20, "title": "Adaptive robust control with slipping parameters estimation\nISA Transactions, 2024", "paper_title": "Adaptive robust control with slipping parameters estimation", "venue": "ISA Transactions, 2024", "url": "https://doi.org/10.1016/j.isatra.2024.02.008"}, {"id": "case::Control / Execution::Slip + skid + disturbances", "label": "Slip + skid + disturbances", "group": "case", "value": 24, "title": "Real robots face combined disturbances that invalidate ideal low-level tracking.", "description": "Real robots face combined disturbances that invalidate ideal low-level tracking."}, {"id": "paper::20", "label": "Fixed-Time Tracking Control of Wheel Mobile Robot in Slipping and Skidding Conditions", "group": "paper", "value": 17, "title": "Fixed-Time Tracking Control of Wheel Mobile Robot in Slipping and Skidding Conditions\nIEEE/ASME T-Mech, 2024", "paper_title": "Fixed-Time Tracking Control of Wheel Mobile Robot in Slipping and Skidding Conditions", "venue": "IEEE/ASME T-Mech, 2024", "url": "https://doi.org/10.1109/TMECH.2024.3401069"}, {"id": "case::Control / Execution::Trajectory tracking error", "label": "Trajectory tracking error", "group": "case", "value": 24, "title": "A good plan can still fail if the low-level controller does not follow it accurately.", "description": "A good plan can still fail if the low-level controller does not follow it accurately."}, {"id": "paper::21", "label": "Trajectory tracking of a wheeled mobile robot", "group": "paper", "value": 17, "title": "Trajectory tracking of a wheeled mobile robot\nAsian Journal of Control, 2024", "paper_title": "Trajectory tracking of a wheeled mobile robot", "venue": "Asian Journal of Control, 2024", "url": "https://doi.org/10.1002/asjc.3403"}, {"id": "case::Control / Execution::Delay in slip/disturbance estimation", "label": "Delay in slip/disturbance estimation", "group": "case", "value": 24, "title": "Estimating and compensating for slip too late reduces controller effectiveness.", "description": "Estimating and compensating for slip too late reduces controller effectiveness."}, {"id": "core::Generalization / Deployment", "label": "Generalization / Deployment", "group": "core", "value": 44, "title": "Generalization / Deployment: 4 concrete failure cases"}, {"id": "case::Generalization / Deployment::Sim-to-real dynamics gap", "label": "Sim-to-real dynamics gap", "group": "case", "value": 24, "title": "Behavior learned in simulation often degrades on physical robots because the dynamics do not match.", "description": "Behavior learned in simulation often degrades on physical robots because the dynamics do not match."}, {"id": "paper::22", "label": "Multi-Robot Cooperative Socially-Aware Navigation Using MARL", "group": "paper", "value": 17, "title": "Multi-Robot Cooperative Socially-Aware Navigation Using MARL\nICRA, 2024", "paper_title": "Multi-Robot Cooperative Socially-Aware Navigation Using MARL", "venue": "ICRA, 2024", "url": "https://doi.org/10.1109/ICRA57147.2024.10611322"}, {"id": "case::Generalization / Deployment::Insufficient pedestrian diversity", "label": "Insufficient pedestrian diversity", "group": "case", "value": 24, "title": "Training and evaluation may cover too little behavioral diversity.", "description": "Training and evaluation may cover too little behavioral diversity."}, {"id": "paper::23", "label": "MAC-ID: MARL with Local Coordination for Individual Diversity", "group": "paper", "value": 17, "title": "MAC-ID: MARL with Local Coordination for Individual Diversity\nICRA, 2024", "paper_title": "MAC-ID: MARL with Local Coordination for Individual Diversity", "venue": "ICRA, 2024", "url": "https://doi.org/10.1109/ICRA57147.2024.10610314"}, {"id": "case::Generalization / Deployment::Unseen-input generalization", "label": "Unseen-input generalization", "group": "case", "value": 24, "title": "Pure learning-based policies can fail on unseen observations or layouts.", "description": "Pure learning-based policies can fail on unseen observations or layouts."}, {"id": "case::Generalization / Deployment::Long-tail safety-critical scenarios", "label": "Long-tail safety-critical scenarios", "group": "case", "value": 24, "title": "Rare edge cases remain difficult even for strong predictors.", "description": "Rare edge cases remain difficult even for strong predictors."}], "edges": [{"from": "root", "to": "core::Objective / Specification", "width": 2.8}, {"from": "core::Objective / Specification", "to": "case::Objective / Specification::Fixed cost-weight brittleness", "width": 1.8}, {"from": "case::Objective / Specification::Fixed cost-weight brittleness", "to": "paper::1", "dashes": true, "width": 1.0}, {"from": "core::Objective / Specification", "to": "case::Objective / Specification::Safety–efficiency trade-off", "width": 1.8}, {"from": "case::Objective / Specification::Safety–efficiency trade-off", "to": "paper::2", "dashes": true, "width": 1.0}, {"from": "core::Objective / Specification", "to": "case::Objective / Specification::Social compliance hard to encode", "width": 1.8}, {"from": "case::Objective / Specification::Social compliance hard to encode", "to": "paper::3", "dashes": true, "width": 1.0}, {"from": "core::Objective / Specification", "to": "case::Objective / Specification::Missing / implicit social norms", "width": 1.8}, {"from": "case::Objective / Specification::Missing / implicit social norms", "to": "paper::4", "dashes": true, "width": 1.0}, {"from": "root", "to": "core::Perception", "width": 2.8}, {"from": "core::Perception", "to": "case::Perception::Limited onboard sensing / FoV", "width": 1.8}, {"from": "case::Perception::Limited onboard sensing / FoV", "to": "paper::5", "dashes": true, "width": 1.0}, {"from": "core::Perception", "to": "case::Perception::Occluded / unseen dynamic agents", "width": 1.8}, {"from": "case::Perception::Occluded / unseen dynamic agents", "to": "paper::6", "dashes": true, "width": 1.0}, {"from": "core::Perception", "to": "case::Perception::Lighting / sensor noise / detection limits", "width": 1.8}, {"from": "case::Perception::Lighting / sensor noise / detection limits", "to": "paper::7", "dashes": true, "width": 1.0}, {"from": "core::Perception", "to": "case::Perception::Dynamic-object feature corruption", "width": 1.8}, {"from": "case::Perception::Dynamic-object feature corruption", "to": "paper::8", "dashes": true, "width": 1.0}, {"from": "root", "to": "core::State Estimation / Mapping", "width": 2.8}, {"from": "core::State Estimation / Mapping", "to": "case::State Estimation / Mapping::False data association", "width": 1.8}, {"from": "case::State Estimation / Mapping::False data association", "to": "paper::9", "dashes": true, "width": 1.0}, {"from": "core::State Estimation / Mapping", "to": "case::State Estimation / Mapping::Map ageing / environment change", "width": 1.8}, {"from": "case::State Estimation / Mapping::Map ageing / environment change", "to": "paper::10", "dashes": true, "width": 1.0}, {"from": "core::State Estimation / Mapping", "to": "case::State Estimation / Mapping::Tracking loss from dynamic points", "width": 1.8}, {"from": "case::State Estimation / Mapping::Tracking loss from dynamic points", "to": "paper::11", "dashes": true, "width": 1.0}, {"from": "core::State Estimation / Mapping", "to": "case::State Estimation / Mapping::Ignoring temporal map patterns", "width": 1.8}, {"from": "case::State Estimation / Mapping::Ignoring temporal map patterns", "to": "paper::12", "dashes": true, "width": 1.0}, {"from": "root", "to": "core::Prediction / Interaction Model", "width": 2.8}, {"from": "core::Prediction / Interaction Model", "to": "case::Prediction / Interaction Model::Multimodal human motion", "width": 1.8}, {"from": "case::Prediction / Interaction Model::Multimodal human motion", "to": "paper::13", "dashes": true, "width": 1.0}, {"from": "core::Prediction / Interaction Model", "to": "case::Prediction / Interaction Model::Long-horizon uncertainty growth", "width": 1.8}, {"from": "case::Prediction / Interaction Model::Long-horizon uncertainty growth", "to": "paper::14", "dashes": true, "width": 1.0}, {"from": "core::Prediction / Interaction Model", "to": "case::Prediction / Interaction Model::Occlusion-state forgetting", "width": 1.8}, {"from": "case::Prediction / Interaction Model::Occlusion-state forgetting", "to": "paper::15", "dashes": true, "width": 1.0}, {"from": "core::Prediction / Interaction Model", "to": "case::Prediction / Interaction Model::Interaction model mismatch", "width": 1.8}, {"from": "case::Prediction / Interaction Model::Interaction model mismatch", "to": "paper::16", "dashes": true, "width": 1.0}, {"from": "root", "to": "core::Planning / Optimization", "width": 2.8}, {"from": "core::Planning / Optimization", "to": "case::Planning / Optimization::Frozen robot problem", "width": 1.8}, {"from": "case::Planning / Optimization::Frozen robot problem", "to": "paper::17", "dashes": true, "width": 1.0}, {"from": "core::Planning / Optimization", "to": "case::Planning / Optimization::Static DWA / dynamic-obstacle weakness", "width": 1.8}, {"from": "case::Planning / Optimization::Static DWA / dynamic-obstacle weakness", "to": "paper::1", "dashes": true, "width": 1.0}, {"from": "core::Planning / Optimization", "to": "case::Planning / Optimization::Reactive rather than anticipatory planning", "width": 1.8}, {"from": "case::Planning / Optimization::Reactive rather than anticipatory planning", "to": "paper::7", "dashes": true, "width": 1.0}, {"from": "core::Planning / Optimization", "to": "case::Planning / Optimization::Aggressive vs cautious local planning", "width": 1.8}, {"from": "case::Planning / Optimization::Aggressive vs cautious local planning", "to": "paper::18", "dashes": true, "width": 1.0}, {"from": "root", "to": "core::Control / Execution", "width": 2.8}, {"from": "core::Control / Execution", "to": "case::Control / Execution::Wheel slip", "width": 1.8}, {"from": "case::Control / Execution::Wheel slip", "to": "paper::19", "dashes": true, "width": 1.0}, {"from": "core::Control / Execution", "to": "case::Control / Execution::Slip + skid + disturbances", "width": 1.8}, {"from": "case::Control / Execution::Slip + skid + disturbances", "to": "paper::20", "dashes": true, "width": 1.0}, {"from": "core::Control / Execution", "to": "case::Control / Execution::Trajectory tracking error", "width": 1.8}, {"from": "case::Control / Execution::Trajectory tracking error", "to": "paper::21", "dashes": true, "width": 1.0}, {"from": "core::Control / Execution", "to": "case::Control / Execution::Delay in slip/disturbance estimation", "width": 1.8}, {"from": "case::Control / Execution::Delay in slip/disturbance estimation", "to": "paper::19", "dashes": true, "width": 1.0}, {"from": "root", "to": "core::Generalization / Deployment", "width": 2.8}, {"from": "core::Generalization / Deployment", "to": "case::Generalization / Deployment::Sim-to-real dynamics gap", "width": 1.8}, {"from": "case::Generalization / Deployment::Sim-to-real dynamics gap", "to": "paper::22", "dashes": true, "width": 1.0}, {"from": "core::Generalization / Deployment", "to": "case::Generalization / Deployment::Insufficient pedestrian diversity", "width": 1.8}, {"from": "case::Generalization / Deployment::Insufficient pedestrian diversity", "to": "paper::23", "dashes": true, "width": 1.0}, {"from": "core::Generalization / Deployment", "to": "case::Generalization / Deployment::Unseen-input generalization", "width": 1.8}, {"from": "case::Generalization / Deployment::Unseen-input generalization", "to": "paper::1", "dashes": true, "width": 1.0}, {"from": "core::Generalization / Deployment", "to": "case::Generalization / Deployment::Long-tail safety-critical scenarios", "width": 1.8}, {"from": "case::Generalization / Deployment::Long-tail safety-critical scenarios", "to": "paper::15", "dashes": true, "width": 1.0}], "paperCount": {"https://doi.org/10.1109/TRO.2024.3400932": 3, "https://doi.org/10.1016/j.robot.2024.104830": 1, "https://www.cs.utexas.edu/~pstone/Papers/bib2html/b2hd-karnansocial2024.html": 1, "https://doi.org/10.3390/s24092794": 1, "https://doi.org/10.1109/LRA.2024.3396057": 1, "https://doi.org/10.1109/TCST.2024.3520462": 1, "https://doi.org/10.1007/s12369-024-01135-z": 2, "https://doi.org/10.1016/j.displa.2024.102663": 1, "https://doi.org/10.1016/j.robot.2024.104786": 1, "https://doi.org/10.1109/TII.2024.3413958": 1, "https://doi.org/10.1002/tee.24004": 1, "https://doi.org/10.1016/j.robot.2024.104724": 1, "https://doi.org/10.1016/j.cviu.2024.104107": 1, "https://doi.org/10.1007/s00521-024-10369-x": 1, "https://arxiv.org/abs/2410.10653": 2, "https://doi.org/10.1016/j.neucom.2023.127117": 1, "https://doi.org/10.1109/IROS58592.2024.10801967": 1, "https://doi.org/10.1016/j.robot.2023.104565": 1, "https://doi.org/10.1016/j.isatra.2024.02.008": 2, "https://doi.org/10.1109/TMECH.2024.3401069": 1, "https://doi.org/10.1002/asjc.3403": 1, "https://doi.org/10.1109/ICRA57147.2024.10611322": 1, "https://doi.org/10.1109/ICRA57147.2024.10610314": 1}};
+
+// The details below are deliberately attached to the existing case IDs.  A paper
+// about an existing case therefore becomes another evidence node on that case's
+// branch; it does not create a duplicate case or a misleading new taxonomy edge.
+const CORE_OVERVIEWS = {
+  "Objective / Specification": "Failures that begin before a path is executed: the system optimizes an incomplete, badly weighted, or socially under-specified definition of success.",
+  "Perception": "Failures caused by an incomplete or unreliable observation of people, obstacles, and scene dynamics before planning begins.",
+  "State Estimation / Mapping": "Failures in the robot's belief about where it is and what the environment contains, including stale maps and corrupted visual associations.",
+  "Prediction / Interaction Model": "Failures in forecasting what nearby people will do and how their behavior changes in response to other agents and the environment.",
+  "Planning / Optimization": "Failures in choosing a locally feasible motion that remains safe, progressive, and comfortable as the scene changes.",
+  "Control / Execution": "Failures after a plan is selected: the physical platform cannot accurately realize the command because of slip, disturbances, delay, or tracking error.",
+  "Generalization / Deployment": "Failures that appear outside the training or test distribution, when a policy, simulator, or safety evaluation does not represent deployment conditions."
+};
+
+const CASE_DETAILS = {
+  "case::Objective / Specification::Fixed cost-weight brittleness": {
+    how: "A fixed objective assigns the same relative importance to progress, clearance, heading, and speed in every context, even though a sparse corridor and a dense crowd require different priorities.",
+    impact: "The planner can oscillate, cut clearance too tightly, or become excessively slow after the environment changes.",
+    check: "Stress-test weight settings across density, visibility, and obstacle-speed changes; monitor clearance, progress, and intervention rate together."
+  },
+  "case::Objective / Specification::Safety–efficiency trade-off": {
+    how: "Safety margins, speed penalties, and task-time rewards pull in different directions, especially in bottlenecks or around uncertain moving people.",
+    impact: "Over-constraining safety produces hesitation or deadlock; under-constraining it raises close-pass and collision risk.",
+    check: "Define measurable minimum-clearance and time-to-collision limits, then evaluate progress only inside those safety bounds."
+  },
+  "case::Objective / Specification::Social compliance hard to encode": {
+    how: "Comfort, yielding, passing side, approach angle, and group boundaries are context-dependent and do not reduce cleanly to one geometric cost term.",
+    impact: "A trajectory may be collision-free yet feel abrupt, intrusive, or impolite to nearby people.",
+    check: "Use scenario-specific social constraints and validate them with human-facing metrics, not distance-only metrics."
+  },
+  "case::Objective / Specification::Missing / implicit social norms": {
+    how: "The robot has no explicit representation of local conventions such as queueing, doorway priority, preferred passing side, or culturally appropriate spacing.",
+    impact: "It can surprise people, block a shared space, or make socially unacceptable choices despite technically safe motion.",
+    check: "Document the local norms for each deployment site and provide a mechanism for adapting or overriding them."
+  },
+  "case::Perception::Limited onboard sensing / FoV": {
+    how: "Onboard sensors expose only a local, line-of-sight slice of the scene; agents outside range, behind the robot, or around a corner are absent from the plan.",
+    impact: "The robot commits to a maneuver that becomes unsafe as soon as a hidden agent enters its sensing region.",
+    check: "Limit speed by observed free space, preserve blind-zone buffers, and use infrastructure sensing only with known latency and reliability."
+  },
+  "case::Perception::Occluded / unseen dynamic agents": {
+    how: "Walls, shelves, doorways, and other people can hide moving agents whose future occupancy is not directly measured.",
+    impact: "A collision or emergency stop occurs when a previously occluded person emerges into the planned path.",
+    check: "Treat occluded regions as uncertain reachable sets and slow or re-plan before crossing their visibility boundary."
+  },
+  "case::Perception::Lighting / sensor noise / detection limits": {
+    how: "Glare, darkness, reflective surfaces, weather, motion blur, and imperfect classifiers make detections intermittent or biased.",
+    impact: "False negatives remove real hazards; false positives cause unnecessary evasive maneuvers and loss of progress.",
+    check: "Track confidence and degradation indicators, fuse complementary sensors, and test the full sensing stack under adverse conditions."
+  },
+  "case::Perception::Dynamic-object feature corruption": {
+    how: "Features on independently moving people or objects are mistaken for stable scene structure and are passed downstream to localization or mapping.",
+    impact: "Pose estimates drift, data association becomes unstable, and the map accumulates transient geometry.",
+    check: "Detect motion consistency, mask dynamic features, and retain only stable landmarks for pose and map updates."
+  },
+  "case::State Estimation / Mapping::False data association": {
+    how: "An observation is paired with the wrong landmark, track, or map element because look-alike features, viewpoint changes, or clutter create ambiguity.",
+    impact: "A single bad match can bias the state estimate and trigger a cascade of incorrect map updates or localization corrections.",
+    check: "Gate associations with geometry and uncertainty, reject outliers, and preserve multiple hypotheses in ambiguous regions."
+  },
+  "case::State Estimation / Mapping::Map ageing / environment change": {
+    how: "Furniture moves, doors change state, seasonal conditions shift, and temporary objects appear while the stored map is treated as current truth.",
+    impact: "The robot plans through blocked space, mislocalizes against obsolete landmarks, or repeatedly detours around objects that no longer exist.",
+    check: "Timestamp map evidence, detect persistent disagreement, and update or down-weight stale regions online."
+  },
+  "case::State Estimation / Mapping::Tracking loss from dynamic points": {
+    how: "When dynamic features dominate the image or scan, matching and pose estimation no longer have enough stable support.",
+    impact: "Odometry jumps or is lost entirely, making a previously safe path impossible to execute reliably.",
+    check: "Measure static-feature support, use dynamic-object masking, and switch to a safe recovery behavior before confidence collapses."
+  },
+  "case::State Estimation / Mapping::Ignoring temporal map patterns": {
+    how: "A map represents only a snapshot and discards repeatable time-dependent structure such as crowd flows, scheduled closures, or recurring occupancy.",
+    impact: "The robot repeatedly makes avoidable route or timing errors in places whose patterns are predictable over time.",
+    check: "Model recurrent changes separately from permanent geometry and evaluate forecasts over days or operating cycles."
+  },
+  "case::Prediction / Interaction Model::Multimodal human motion": {
+    how: "At an intersection or doorway, a person may yield, turn, stop, accelerate, or choose several valid routes; one mean trajectory represents none of them well.",
+    impact: "The robot underestimates feasible human occupancy and commits to a path that conflicts with a plausible alternative action.",
+    check: "Maintain a calibrated distribution of intent hypotheses and plan against their combined reachable space."
+  },
+  "case::Prediction / Interaction Model::Long-horizon uncertainty growth": {
+    how: "Small errors in pose, intent, and interaction assumptions compound as the prediction horizon increases.",
+    impact: "A plan that depends on a distant forecast becomes brittle, either colliding when the forecast is wrong or freezing because the uncertainty envelope grows too wide.",
+    check: "Expose prediction confidence to the planner and re-plan frequently instead of treating distant predictions as precise commitments."
+  },
+  "case::Prediction / Interaction Model::Occlusion-state forgetting": {
+    how: "After a person disappears behind an occluder, the tracker drops the latent state instead of propagating a growing uncertainty region.",
+    impact: "The robot behaves as though the hidden agent no longer exists and may enter an unsafe crossing or blind corner.",
+    check: "Continue state propagation through occlusion, inflate uncertainty with elapsed time, and reason about possible reappearance."
+  },
+  "case::Prediction / Interaction Model::Interaction model mismatch": {
+    how: "A model trained on independent walkers or a single crowd style misses yielding, following, grouping, negotiation, and environment-specific reactions.",
+    impact: "Predicted paths look plausible in isolation but fail when people adapt to the robot or to one another.",
+    check: "Test on interaction-rich scenes, condition predictions on scene semantics, and monitor calibration after deployment."
+  },
+  "case::Planning / Optimization::Frozen robot problem": {
+    how: "Conservative local constraints mark every available motion as risky, often in dense crowds, narrow passages, or mutually blocking encounters.",
+    impact: "The robot stops indefinitely, blocks traffic, or repeatedly oscillates without making task progress.",
+    check: "Track time without progress and provide a bounded recovery policy such as communicating intent, backing out, or requesting help."
+  },
+  "case::Planning / Optimization::Static DWA / dynamic-obstacle weakness": {
+    how: "Classical DWA evaluates short-horizon velocity samples with static or weakly dynamic assumptions and hand-tuned weights.",
+    impact: "It reacts late to moving obstacles, selects inefficient detours, or becomes unsafe when obstacle behavior differs from the tuning scenario.",
+    check: "Use dynamic-obstacle prediction or adaptive weights and benchmark against changing speed, direction, and crowd density."
+  },
+  "case::Planning / Optimization::Reactive rather than anticipatory planning": {
+    how: "The local planner responds only to current positions or very short extrapolations instead of reserving space for likely future motion.",
+    impact: "Avoidance starts too late, creates sharp detours, and can force uncomfortable close passes or emergency stops.",
+    check: "Compare time-to-collision, jerk, and minimum clearance with and without multi-step prediction in the loop."
+  },
+  "case::Planning / Optimization::Aggressive vs cautious local planning": {
+    how: "Velocity, clearance, and goal-progress terms must be balanced under uncertainty; a single setting cannot suit every pedestrian density or passage width.",
+    impact: "Aggressive settings create near misses; cautious settings cause slow, hesitant motion and prevent useful service.",
+    check: "Adapt behavior to risk and context, with explicit limits on acceleration, clearance, and time spent blocking a route."
+  },
+  "case::Control / Execution::Wheel slip": {
+    how: "Low friction, uneven surfaces, rapid braking, or acceleration break the assumed relationship between wheel rotation and vehicle motion.",
+    impact: "The robot deviates from the commanded path and can miss a narrow safety margin even when the planner was correct.",
+    check: "Estimate longitudinal and lateral slip online, constrain speed to surface conditions, and feed execution error back to planning."
+  },
+  "case::Control / Execution::Slip + skid + disturbances": {
+    how: "Slip and skid combine with payload changes, contact variation, slope, and external forces, making the low-level model strongly uncertain.",
+    impact: "Tracking degrades unpredictably and a controller designed for a single disturbance may fail under the combined case.",
+    check: "Evaluate controllers under combined disturbance profiles and require bounded recovery time, not only nominal tracking accuracy."
+  },
+  "case::Control / Execution::Trajectory tracking error": {
+    how: "Actuator limits, model mismatch, latency, and unmodeled dynamics cause the realized pose to lag or diverge from the reference trajectory.",
+    impact: "A collision-free planned path loses its clearance, and errors may accumulate into a localization or replanning failure.",
+    check: "Report cross-track, heading, and delay errors against safety margin; re-plan when tracking error exceeds the controller envelope."
+  },
+  "case::Control / Execution::Delay in slip/disturbance estimation": {
+    how: "The observer recognizes a surface or disturbance change only after the vehicle has already deviated, while compensation arrives too late.",
+    impact: "Short high-risk maneuvers such as braking before a person or turning in a narrow aisle are most exposed.",
+    check: "Measure detection-to-compensation latency and retain a conservative fallback envelope while the estimate is uncertain."
+  },
+  "case::Generalization / Deployment::Sim-to-real dynamics gap": {
+    how: "Simulator friction, actuation delay, sensor noise, contact, and human behavior differ from the physical platform and site.",
+    impact: "Policies that look safe in simulation can oscillate, oversteer, or fail to stop safely in deployment.",
+    check: "Use system identification and domain randomization, then validate progressively on the target hardware with operational safety limits."
+  },
+  "case::Generalization / Deployment::Insufficient pedestrian diversity": {
+    how: "Training and tests cover only a narrow set of walking speeds, group structures, mobility aids, cultural norms, and reactions to robots.",
+    impact: "Performance is overstated and the robot behaves poorly around people whose motion or preferences were absent from the data.",
+    check: "Audit coverage by behavior and context, not only by sample count; include rare and accessibility-relevant interactions."
+  },
+  "case::Generalization / Deployment::Unseen-input generalization": {
+    how: "A learned policy receives layouts, sensor artifacts, obstacle motions, or semantic cues outside the distribution represented during training.",
+    impact: "It may make confident but unsafe actions because its internal uncertainty is not represented in the control decision.",
+    check: "Use out-of-distribution detection, uncertainty-aware fallback behavior, and held-out sites rather than random splits alone."
+  },
+  "case::Generalization / Deployment::Long-tail safety-critical scenarios": {
+    how: "Rare combinations of occlusion, intent change, perception error, and limited stopping distance occur too seldom in logged data to be learned or tested by chance.",
+    impact: "Average-case metrics look strong while a small set of high-consequence scenarios remains unmitigated.",
+    check: "Generate targeted adversarial and counterfactual scenarios, then assess worst-case safety margins alongside aggregate performance."
+  }
+};
+
+// Each entry below either adds a new evidence node to an existing case or reuses
+// an already-present paper.  The second form is useful when one paper supports
+// two distinct failure cases without duplicating its node.
+const EXTRA_EVIDENCE = [
+  {
+    caseId: "case::Objective / Specification::Fixed cost-weight brittleness",
+    paper: { paper_title: "An improved dynamic window approach algorithm for dynamic obstacle avoidance in mobile robot formation", venue: "Decision Analytics Journal, 2024", url: "https://doi.org/10.1016/j.dajour.2024.100471" },
+    note: "Adds variable speed and safety-distance evaluation coefficients for dynamic-obstacle DWA."
+  },
+  {
+    caseId: "case::Planning / Optimization::Static DWA / dynamic-obstacle weakness",
+    paper: { paper_title: "An improved dynamic window approach algorithm for dynamic obstacle avoidance in mobile robot formation", venue: "Decision Analytics Journal, 2024", url: "https://doi.org/10.1016/j.dajour.2024.100471" },
+    note: "A shared second source on adapting DWA evaluation to moving obstacles."
+  },
+  {
+    caseId: "case::Objective / Specification::Safety–efficiency trade-off",
+    paper: { paper_title: "Safety Verification and Navigation for Autonomous Vehicles based on Signal Temporal Logic Constraints", venue: "arXiv, 2024", url: "https://arxiv.org/abs/2409.10689" },
+    note: "Frames safety requirements as explicit temporal constraints before deployment."
+  },
+  {
+    caseId: "case::Objective / Specification::Social compliance hard to encode",
+    paper: { paper_title: "Social Momentum: Design and Evaluation of a Framework for Socially Competent Robot Navigation", venue: "ACM Transactions on Human-Robot Interaction, 2022", url: "https://doi.org/10.1145/3495244" },
+    note: "Connects socially competent navigation to cooperative, context-sensitive motion."
+  },
+  {
+    caseId: "case::Objective / Specification::Missing / implicit social norms",
+    paper: { paper_title: "SONAR: An Adaptive Control Architecture for Social Norm Aware Robots", venue: "International Journal of Social Robotics, 2024", url: "https://doi.org/10.1007/s12369-024-01172-8" },
+    note: "Provides an explicit norm-aware architecture for recognizing and adapting to social conventions."
+  },
+  {
+    caseId: "case::Perception::Dynamic-object feature corruption",
+    paper: { paper_title: "DMOT-SLAM: visual SLAM in dynamic environments with moving object tracking", venue: "Measurement Science and Technology, 2024", url: "https://doi.org/10.1088/1361-6501/ad4dc7" },
+    note: "Combines dynamic-object identification with pose estimation in dynamic scenes."
+  },
+  {
+    caseId: "case::State Estimation / Mapping::Tracking loss from dynamic points",
+    paper: { paper_title: "DOA-SLAM: An Efficient Stereo Visual SLAM System in Dynamic Environment", venue: "International Journal of Control, Automation and Systems, 2025", url: "https://doi.org/10.1007/s12555-024-0180-1" },
+    note: "Filters moving-object observations to retain stable tracking support."
+  },
+  {
+    caseId: "case::Prediction / Interaction Model::Multimodal human motion",
+    paper: { paper_title: "SocialCVAE: Predicting Pedestrian Trajectory via Interaction Conditioned Latents", venue: "AAAI, 2024", url: "https://doi.org/10.1609/aaai.v38i6.28439" },
+    note: "Represents behavior uncertainty with interaction-conditioned latent variables."
+  },
+  {
+    caseId: "case::Prediction / Interaction Model::Long-horizon uncertainty growth",
+    paper: { paper_title: "Long-Term Human Trajectory Prediction Using 3D Dynamic Scene Graphs", venue: "IEEE Robotics and Automation Letters, 2024", url: "https://doi.org/10.1109/LRA.2024.3482169" },
+    note: "Uses scene context to produce long-term, multimodal indoor human trajectory forecasts."
+  },
+  {
+    caseId: "case::Prediction / Interaction Model::Interaction model mismatch",
+    paper: { paper_title: "Goal-CurveNet: A pedestrian trajectory prediction network using heterogeneous graph attention goal prediction and curve fitting", venue: "Engineering Applications of Artificial Intelligence, 2024", url: "https://doi.org/10.1016/j.engappai.2024.108323" },
+    note: "Models both pedestrian interaction and physical-scene context in trajectory prediction."
+  },
+  {
+    caseId: "case::Planning / Optimization::Reactive rather than anticipatory planning",
+    paper: { paper_title: "Social interaction model enhanced with speculation stage for human trajectory prediction", venue: "Robotics and Autonomous Systems, 2023", url: "https://doi.org/10.1016/j.robot.2022.104352" },
+    note: "Uses speculative future interaction features rather than only current observations."
+  },
+  {
+    caseId: "case::Control / Execution::Wheel slip",
+    paper: { paper_title: "A virtual reference trajectory scheme for tracking control of wheeled mobile robots with slip disturbances", venue: "Proceedings of the Institution of Mechanical Engineers, Part I, 2025", url: "https://doi.org/10.1177/01423312241239145" },
+    note: "Feeds estimated slip disturbance into a virtual reference trajectory for compensation."
+  },
+  {
+    caseId: "case::Control / Execution::Trajectory tracking error",
+    paper: { paper_title: "A virtual reference trajectory scheme for tracking control of wheeled mobile robots with slip disturbances", venue: "Proceedings of the Institution of Mechanical Engineers, Part I, 2025", url: "https://doi.org/10.1177/01423312241239145" },
+    note: "A shared source connecting slip estimation directly to tracking performance."
+  },
+  {
+    caseId: "case::Control / Execution::Slip + skid + disturbances",
+    paper: { paper_title: "Superiority of model predictive control with robust and stable approach for sliding wheeled mobile systems in the presence of obstacles", venue: "Optimal Control Applications and Methods, 2024", url: "https://doi.org/10.1002/oca.3107" },
+    note: "Evaluates robust MPC under wheel slip and obstacle avoidance."
+  },
+  {
+    caseId: "case::Generalization / Deployment::Sim-to-real dynamics gap",
+    paper: { paper_title: "Sim-to-real transfer of active suspension control using deep reinforcement learning", venue: "Robotics and Autonomous Systems, 2024", url: "https://doi.org/10.1016/j.robot.2024.104731" },
+    note: "Shows the role of system identification, randomization, and delay modeling in transfer."
+  },
+  {
+    caseId: "case::Generalization / Deployment::Long-tail safety-critical scenarios",
+    paper: { paper_title: "Adversarial Safety-Critical Scenario Generation using Naturalistic Human Driving Priors", venue: "arXiv, 2024", url: "https://arxiv.org/abs/2408.03200" },
+    note: "Generates diverse, adversarial scenarios to expose rare safety failures."
+  },
+  {
+    caseId: "case::Prediction / Interaction Model::Long-horizon uncertainty growth",
+    paper: { url: "https://arxiv.org/abs/2410.10653" },
+    note: "This existing source also shows why uncertainty must persist over extended prediction horizons."
+  },
+  {
+    caseId: "case::Objective / Specification::Safety–efficiency trade-off",
+    paper: { paper_title: "Scenario-based motion planning with bounded probability of collision", venue: "The International Journal of Robotics Research, 2025", url: "https://doi.org/10.1177/02783649251315203" },
+    note: "Uses a bounded collision probability to avoid unnecessary conservatism while maintaining safety."
+  },
+  {
+    caseId: "case::Objective / Specification::Social compliance hard to encode",
+    paper: { paper_title: "SANG: Socially Aware Navigation Between Groups", venue: "International Journal of Social Robotics, 2025", url: "https://doi.org/10.1007/s12369-025-01250-5" },
+    note: "Addresses navigation choices around human groups and socially occupied space."
+  },
+  {
+    caseId: "case::Perception::Limited onboard sensing / FoV",
+    paper: { paper_title: "Towards Safe and Efficient Last-Mile Delivery: A Multi-Modal Socially Aware Navigation Framework for Autonomous Robots on Pedestrian-Crowded Sidewalks", venue: "IEEE CIS-RAM, 2024", url: "https://doi.org/10.1109/CIS-RAM61939.2024.10672669" },
+    note: "Combines multi-modal 3D detection and pedestrian-motion prediction for a crowded deployment."
+  },
+  {
+    caseId: "case::Perception::Lighting / sensor noise / detection limits",
+    paper: { paper_title: "Uncertainty-aware visually-attentive navigation using deep neural networks", venue: "The International Journal of Robotics Research, 2024", url: "https://doi.org/10.1177/02783649231218720" },
+    note: "Explicitly treats sensor noise, localization uncertainty, and map drift during navigation."
+  },
+  {
+    caseId: "case::State Estimation / Mapping::Map ageing / environment change",
+    paper: { paper_title: "Safe and Robust Map Updating for Long-Term Operations in Dynamic Environments", venue: "Sensors, 2023", url: "https://doi.org/10.3390/s23136066" },
+    note: "Links localization confidence to safe map-update decisions in changing environments."
+  },
+  {
+    caseId: "case::State Estimation / Mapping::Map ageing / environment change",
+    paper: { paper_title: "Tightly-Coupled Lidar-Based Lifelong Mapping using Wheels and a MEMS Gyroscope for Mobile Robots in Dynamic Environment", venue: "RAIIE, 2024", url: "https://doi.org/10.1145/3689299.3689301" },
+    note: "Detects environmental change and updates a mobile robot's map with tightly coupled sensing."
+  },
+  {
+    caseId: "case::State Estimation / Mapping::Ignoring temporal map patterns",
+    paper: { paper_title: "Bacchus Long-Term (BLT) data set: Acquisition of the agricultural multimodal BLT data set with automated robot deployment", venue: "Journal of Field Robotics, 2024", url: "https://doi.org/10.1002/rob.22228" },
+    note: "Provides repeated, seasonal robot data for evaluating temporal localization and mapping change."
+  },
+  {
+    caseId: "case::Planning / Optimization::Frozen robot problem",
+    paper: { paper_title: "Deadlock-free, safe, and decentralized multi-robot navigation in social mini-games via discrete-time control barrier functions", venue: "Autonomous Robots, 2025", url: "https://doi.org/10.1007/s10514-025-10194-8" },
+    note: "Targets deadlock mechanisms directly instead of resolving them only after the robot stops."
+  },
+  {
+    caseId: "case::Planning / Optimization::Reactive rather than anticipatory planning",
+    paper: { paper_title: "RUMOR: Reinforcement learning for understanding a model of the real world for navigation in dynamic environments", venue: "Robotics and Autonomous Systems, 2025", url: "https://doi.org/10.1016/j.robot.2025.105020" },
+    note: "Uses a velocity-space model of future scene dynamics rather than only current obstacle positions."
+  },
+  {
+    caseId: "case::Planning / Optimization::Aggressive vs cautious local planning",
+    paper: { paper_title: "Robust motion planning for autonomous vehicles based on environment and uncertainty-aware reachability prediction", venue: "Control Engineering Practice, 2025", url: "https://doi.org/10.1016/j.conengprac.2025.106319" },
+    note: "Balances progress with uncertainty-aware reachable sets for surrounding dynamic agents."
+  },
+  {
+    caseId: "case::Control / Execution::Wheel slip",
+    paper: { paper_title: "PSO-Based Optimal Tracking Control of Mobile Robots with Unknown Wheel Slipping", venue: "Electronics, 2025", url: "https://doi.org/10.3390/electronics14173427" },
+    note: "Estimates unknown slip online and adapts control weights to retain tracking accuracy."
+  },
+  {
+    caseId: "case::Control / Execution::Delay in slip/disturbance estimation",
+    paper: { paper_title: "Prescribed-time Sliding Mode Control of Perturbed Wheeled Mobile Robots", venue: "IFAC-PapersOnLine, 2025", url: "https://doi.org/10.1016/j.ifacol.2025.10.164" },
+    note: "Pairs a disturbance observer with prescribed-time tracking for perturbed mobile robots."
+  },
+  {
+    caseId: "case::Generalization / Deployment::Sim-to-real dynamics gap",
+    paper: { paper_title: "SANG: Socially Aware Navigation Between Groups", venue: "International Journal of Social Robotics, 2025", url: "https://doi.org/10.1007/s12369-025-01250-5" },
+    note: "Uses a real-to-sim environment designed for training and evaluating socially aware navigation."
+  },
+  {
+    caseId: "case::Generalization / Deployment::Insufficient pedestrian diversity",
+    paper: { paper_title: "Social robot navigation: a review and benchmarking of learning-based methods", venue: "Frontiers in Robotics and AI, 2025", url: "https://doi.org/10.3389/frobt.2025.1658643" },
+    note: "Benchmarks multiple crowd structures, densities, chokepoints, and pedestrian-motion sources."
+  },
+  {
+    caseId: "case::Generalization / Deployment::Insufficient pedestrian diversity",
+    paper: { paper_title: "Towards smooth mobile robot deployments in dynamic human environments", venue: "AI Magazine, 2024", url: "https://doi.org/10.1002/aaai.12192" },
+    note: "Synthesizes deployment challenges from varied human interaction contexts and evaluation practices."
+  },
+  {
+    caseId: "case::Generalization / Deployment::Unseen-input generalization",
+    paper: { paper_title: "Training Is Execution: A Reinforcement Learning-Based Collision Avoidance Algorithm for Volatile Scenarios", venue: "IEEE Access, 2024", url: "https://doi.org/10.1109/ACCESS.2024.3448292" },
+    note: "Targets adaptation and generalization when the environment changes after training."
+  },
+  {
+    caseId: "case::Generalization / Deployment::Unseen-input generalization",
+    paper: { paper_title: "DOZE: A Dataset for Open-Vocabulary Zero-Shot Object Navigation in Dynamic Environments", venue: "arXiv / IEEE Robotics and Automation Letters, 2024", url: "https://doi.org/10.48550/arXiv.2402.19007" },
+    note: "Introduces dynamic, diverse, zero-shot navigation conditions that expose unseen-input failures."
+  },
+  {
+    caseId: "case::Perception::Occluded / unseen dynamic agents",
+    paper: { paper_title: "Occlusion-Aware Consistent Model Predictive Control for Robot Navigation in Occluded Obstacle-Dense Environments", venue: "arXiv, 2025", url: "https://arxiv.org/abs/2503.04563" },
+    note: "Represents possible hidden-obstacle positions as online risk regions during robot navigation."
+  },
+  {
+    caseId: "case::State Estimation / Mapping::False data association",
+    paper: { paper_title: "Real-Time Dynamic SLAM Using Moving Probability Based on IMU and Segmentation", venue: "IEEE Sensors Journal, 2024", url: "https://doi.org/10.1109/JSEN.2024.3365822" },
+    note: "Rejects dynamically associated feature points and reduces false loop-closure risk."
+  },
+  {
+    caseId: "case::Prediction / Interaction Model::Occlusion-state forgetting",
+    paper: { paper_title: "Robotic Occlusion Reasoning for Efficient Object Existence Prediction", venue: "arXiv, 2021", url: "https://arxiv.org/abs/2107.12095" },
+    note: "Uses explicit occlusion reasoning instead of treating hidden objects as absent."
+  },
+  {
+    caseId: "case::Objective / Specification::Safety–efficiency trade-off",
+    paper: { paper_title: "ARPL: attraction-repulsion-guided stabilized policy learning for social robot navigation", venue: "Journal of King Saud University Computer and Information Sciences, 2026", url: "https://doi.org/10.1007/s44443-026-00785-5" },
+    note: "Jointly optimizes goal progress, collision avoidance, and social interaction instead of optimizing efficiency alone."
+  },
+  {
+    caseId: "case::Objective / Specification::Social compliance hard to encode",
+    paper: { paper_title: "ARPL: attraction-repulsion-guided stabilized policy learning for social robot navigation", venue: "Journal of King Saud University Computer and Information Sciences, 2026", url: "https://doi.org/10.1007/s44443-026-00785-5" },
+    note: "Provides an explicit attraction-repulsion reward for stable, socially compliant navigation in dense crowds."
+  },
+  {
+    caseId: "case::Objective / Specification::Missing / implicit social norms",
+    paper: { paper_title: "Enhanced Dynamic Window Approach for socially compliant robot navigation", venue: "Frontiers in Robotics and AI, 2026", url: "https://doi.org/10.3389/frobt.2026.1769678" },
+    note: "Turns class-specific proxemic limits into hard trajectory filters before DWA cost scoring."
+  },
+  {
+    caseId: "case::Planning / Optimization::Static DWA / dynamic-obstacle weakness",
+    paper: { paper_title: "Enhanced Dynamic Window Approach for socially compliant robot navigation", venue: "Frontiers in Robotics and AI, 2026", url: "https://doi.org/10.3389/frobt.2026.1769678" },
+    note: "Extends geometric DWA with semantic obstacle classes and social-compliance screening."
+  },
+  {
+    caseId: "case::Objective / Specification::Fixed cost-weight brittleness",
+    paper: { paper_title: "Risk-Adaptive Dynamic Window Approach for Mobile Robot Navigation", venue: "IEEE Access, 2026", url: "https://doi.org/10.1109/ACCESS.2026.3701771" },
+    note: "Adapts local-planner behavior to assessed risk rather than relying on one fixed objective balance."
+  },
+  {
+    caseId: "case::Planning / Optimization::Aggressive vs cautious local planning",
+    paper: { paper_title: "Risk-Adaptive Dynamic Window Approach for Mobile Robot Navigation", venue: "IEEE Access, 2026", url: "https://doi.org/10.1109/ACCESS.2026.3701771" },
+    note: "Directly targets the clearance-versus-progress decision that makes local planners either timid or unsafe."
+  },
+  {
+    caseId: "case::Planning / Optimization::Static DWA / dynamic-obstacle weakness",
+    paper: { paper_title: "A dynamically hybrid path planning and obstacle avoidance algorithm for mobile robots based on improved A-star and dynamic windows approach", venue: "Robotics Engineering, 2026", url: "https://doi.org/10.1016/j.rineng.2025.108924" },
+    note: "Combines global A* guidance with fuzzy-adjusted DWA to improve dynamic obstacle avoidance and escape local optima."
+  },
+  {
+    caseId: "case::Planning / Optimization::Frozen robot problem",
+    paper: { paper_title: "A dynamically hybrid path planning and obstacle avoidance algorithm for mobile robots based on improved A-star and dynamic windows approach", venue: "Robotics Engineering, 2026", url: "https://doi.org/10.1016/j.rineng.2025.108924" },
+    note: "Uses global subgoals to reduce local-optimum traps that can leave a conservative robot stuck."
+  },
+  {
+    caseId: "case::Objective / Specification::Missing / implicit social norms",
+    paper: { paper_title: "Socially acceptable sequential approaches to groups in dynamic environments", venue: "Intelligent Service Robotics, 2026", url: "https://doi.org/10.1007/s11370-026-00705-6" },
+    note: "Studies approach behavior around groups of people rather than treating every collision-free path as socially acceptable."
+  },
+  {
+    caseId: "case::Perception::Dynamic-object feature corruption",
+    paper: { paper_title: "An instance-aware segmentation and optical flow based DVI-SLAM for dynamic environments", venue: "Scientific Reports, 2026", url: "https://doi.org/10.1038/s41598-026-46920-0" },
+    note: "Uses instance segmentation, optical flow, and geometric checks to exclude moving features from pose estimation."
+  },
+  {
+    caseId: "case::State Estimation / Mapping::Tracking loss from dynamic points",
+    paper: { paper_title: "An instance-aware segmentation and optical flow based DVI-SLAM for dynamic environments", venue: "Scientific Reports, 2026", url: "https://doi.org/10.1038/s41598-026-46920-0" },
+    note: "A second use of the same evidence: robust dynamic-feature rejection protects visual-inertial tracking."
+  },
+  {
+    caseId: "case::State Estimation / Mapping::False data association",
+    paper: { paper_title: "Semantic SLAM in Indoor Dynamic Environments Using Instance Segmentation", venue: "IEEE DLCV, 2026", url: "https://doi.org/10.1109/DLCV69906.2026.11635560" },
+    note: "Pixel-level instance masks filter moving-object observations before they create spurious visual associations."
+  },
+  {
+    caseId: "case::State Estimation / Mapping::Tracking loss from dynamic points",
+    paper: { paper_title: "DynaGSLAM: Real-Time Gaussian-Splatting SLAM for Online Rendering, Tracking, Motion Predictions of Moving Objects in Dynamic Scenes", venue: "WACV, 2026", url: "https://doi.org/10.1109/WACV61042.2026.00240" },
+    note: "Jointly handles ego-motion and moving-object motion instead of contaminating the static map with dynamic updates."
+  },
+  {
+    caseId: "case::Perception::Dynamic-object feature corruption",
+    paper: { paper_title: "LIG-SLAM: A Lightweight Visual RGB-D SLAM for Indoor Dynamic Environments Leveraging Instance Segmentation and Geometric Information", venue: "Sensors, 2026", url: "https://doi.org/10.3390/s26102926" },
+    note: "Adds a real-time instance-segmentation and geometric-verification route for suppressing dynamic-object corruption."
+  },
+  {
+    caseId: "case::Prediction / Interaction Model::Multimodal human motion",
+    paper: { paper_title: "Risk-Aware Multi-Modal Pedestrian Trajectory Prediction With Scene-Attentive Social Attention", venue: "IET Intelligent Transport Systems, 2026", url: "https://doi.org/10.1049/itr2.70252" },
+    note: "Forecasts multiple pedestrian futures while combining social attention, scene context, and location-specific risk."
+  },
+  {
+    caseId: "case::Prediction / Interaction Model::Interaction model mismatch",
+    paper: { paper_title: "Risk-Aware Multi-Modal Pedestrian Trajectory Prediction With Scene-Attentive Social Attention", venue: "IET Intelligent Transport Systems, 2026", url: "https://doi.org/10.1049/itr2.70252" },
+    note: "Models inter-pedestrian dependencies and local scene risk that simple pairwise interaction models omit."
+  },
+  {
+    caseId: "case::Prediction / Interaction Model::Long-horizon uncertainty growth",
+    paper: { paper_title: "Risk-Aware Multi-Modal Pedestrian Trajectory Prediction With Scene-Attentive Social Attention", venue: "IET Intelligent Transport Systems, 2026", url: "https://doi.org/10.1049/itr2.70252" },
+    note: "Uses multiple predicted hypotheses and safety-oriented metrics instead of trusting one nominal long-horizon forecast."
+  },
+  {
+    caseId: "case::Control / Execution::Trajectory tracking error",
+    paper: { paper_title: "Research on a Robust Adaptive Controller with Disturbance Observer for Wheeled Mobile Robot", venue: "Journal of Automation, Mobile Robotics and Intelligent Systems, 2026", url: "https://doi.org/10.14313/jamris-2026-001" },
+    note: "Uses an outer-loop disturbance observer to reduce position error when loads and paths vary."
+  },
+  {
+    caseId: "case::Control / Execution::Delay in slip/disturbance estimation",
+    paper: { paper_title: "Research on a Robust Adaptive Controller with Disturbance Observer for Wheeled Mobile Robot", venue: "Journal of Automation, Mobile Robotics and Intelligent Systems, 2026", url: "https://doi.org/10.14313/jamris-2026-001" },
+    note: "Supplies current disturbance estimates to the trajectory controller, making delayed compensation an explicit design concern."
+  },
+  {
+    caseId: "case::Control / Execution::Trajectory tracking error",
+    paper: { paper_title: "Adaptive and robust tracking control for nonholonomic wheeled mobile robots with parameter adjustment", venue: "Proceedings of the Institution of Mechanical Engineers, Part I, 2026", url: "https://doi.org/10.1177/09596518261449554" },
+    note: "Combines adaptive parameters, fuzzy approximation, and a nonlinear disturbance observer for robust tracking."
+  },
+  {
+    caseId: "case::Control / Execution::Slip + skid + disturbances",
+    paper: { paper_title: "Adaptive and robust tracking control for nonholonomic wheeled mobile robots with parameter adjustment", venue: "Proceedings of the Institution of Mechanical Engineers, Part I, 2026", url: "https://doi.org/10.1177/09596518261449554" },
+    note: "Connects model uncertainty and external disturbance directly to tracking degradation on a nonholonomic platform."
+  },
+  {
+    caseId: "case::Generalization / Deployment::Unseen-input generalization",
+    paper: { paper_title: "ARPL: attraction-repulsion-guided stabilized policy learning for social robot navigation", venue: "Journal of King Saud University Computer and Information Sciences, 2026", url: "https://doi.org/10.1007/s44443-026-00785-5" },
+    note: "Reports robustness across out-of-distribution crowd scenarios and validation on a physical ROS mobile robot."
+  },
+  {
+    caseId: "case::Generalization / Deployment::Long-tail safety-critical scenarios",
+    paper: { paper_title: "Deep Reinforcement Learning for Dynamic Obstacle Avoidance of Mobile Robots in Indoor Environments: A Review", venue: "Sensors, 2026", url: "https://doi.org/10.3390/s26154797" },
+    note: "Surveys how dynamic-obstacle benchmarks expose rare and safety-critical failure conditions in learned avoidance policies."
+  }
+];
+
+const extraPaperIds = new Map();
+EXTRA_EVIDENCE.forEach(({ caseId, paper, note }) => {
+  let paperNode = DATA.nodes.find(n => n.group === "paper" && n.url === paper.url);
+  if (!paperNode) {
+    const id = `paper::extra::${extraPaperIds.size + 1}`;
+    extraPaperIds.set(paper.url, id);
+    paperNode = {
+      id,
+      label: paper.paper_title,
+      group: "paper",
+      value: 17,
+      title: `${paper.paper_title}\n${paper.venue}`,
+      paper_title: paper.paper_title,
+      venue: paper.venue,
+      url: paper.url
+    };
+    DATA.nodes.push(paperNode);
+  }
+  DATA.edges.push({ from: caseId, to: paperNode.id, dashes: true, width: 1.0, note });
+  DATA.paperCount[paper.url] = (DATA.paperCount[paper.url] || 0) + 1;
+});
+
+function resolveDataBranch(node) {
+  if (!node) return null;
+  if (node.group === "core") return node.label;
+  if (node.group === "case") return node.id.split("::")[1] || null;
+  if (node.group === "paper") {
+    const evidenceEdge = DATA.edges.find(edge => edge.to === node.id && String(edge.from).startsWith("case::"));
+    return evidenceEdge ? String(evidenceEdge.from).split("::")[1] || null : null;
+  }
+  return null;
+}
+
+// Store the branch on every rendered node once. This prevents a shared evidence
+// paper or a later filter update from collapsing its colour to the fallback tone.
+DATA.nodes.forEach(node => {
+  const branch = resolveDataBranch(node);
+  if (branch) node.branch = branch;
+});
+
+const nodeMap = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
+
+const BRANCH_COLORS = {
+  "Objective / Specification": "#8877a4",
+  "Perception": "#5f91af",
+  "State Estimation / Mapping": "#62999b",
+  "Prediction / Interaction Model": "#6e987d",
+  "Planning / Optimization": "#af925f",
+  "Control / Execution": "#b77d6a",
+  "Generalization / Deployment": "#a97487"
+};
+
+const SHORT_LABELS = {
+  "Autonomous Navigation\nFailures": "NAV\nFAILURES",
+
+  "Objective / Specification": "Objective",
+  "Perception": "Perception",
+  "State Estimation / Mapping": "State Est.",
+  "Prediction / Interaction Model": "Prediction",
+  "Planning / Optimization": "Planning",
+  "Control / Execution": "Control",
+  "Generalization / Deployment": "Deployment",
+
+  "Fixed cost-weight brittleness": "Fixed Costs",
+  "Safety–efficiency trade-off": "Safety vs Speed",
+  "Social compliance hard to encode": "Social Cost",
+  "Missing / implicit social norms": "Social Norms",
+
+  "Limited onboard sensing / FoV": "Limited FoV",
+  "Occluded / unseen dynamic agents": "Occlusion",
+  "Lighting / sensor noise / detection limits": "Sensor Noise",
+  "Dynamic-object feature corruption": "Dynamic Features",
+
+  "False data association": "False Match",
+  "Map ageing / environment change": "Map Ageing",
+  "Tracking loss from dynamic points": "Tracking Loss",
+  "Ignoring temporal map patterns": "Temporal Map",
+
+  "Multimodal human motion": "Multimodal",
+  "Long-horizon uncertainty growth": "Horizon Uncert.",
+  "Occlusion-state forgetting": "Hidden State",
+  "Interaction model mismatch": "Interaction Gap",
+
+  "Frozen robot problem": "Robot Freezing",
+  "Static DWA / dynamic-obstacle weakness": "DWA Limits",
+  "Reactive rather than anticipatory planning": "Reactive Plan",
+  "Aggressive vs cautious local planning": "Aggressive/Cautious",
+
+  "Wheel slip": "Wheel Slip",
+  "Slip + skid + disturbances": "Slip & Skid",
+  "Trajectory tracking error": "Tracking Error",
+  "Delay in slip/disturbance estimation": "Estimation Delay",
+
+  "Sim-to-real dynamics gap": "Sim-to-Real",
+  "Insufficient pedestrian diversity": "Ped. Diversity",
+  "Unseen-input generalization": "Unseen Inputs",
+  "Long-tail safety-critical scenarios": "Long-tail"
+};
+
+function branchOf(node) {
+  return node?.branch || null;
+}
+
+function hexToRgba(hex, alpha) {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.substring(0,2), 16);
+  const g = parseInt(h.substring(2,4), 16);
+  const b = parseInt(h.substring(4,6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function nodeColor(n) {
+  if (n.group === "root") {
+    return {
+      background: "rgba(133, 109, 136, 0.80)",
+      border: "#785f7d",
+      highlight: { background: "rgba(133, 109, 136, 0.94)", border: "#684e6d" },
+      hover: { background: "rgba(133, 109, 136, 0.90)", border: "#684e6d" }
+    };
+  }
+  const branch = branchOf(n);
+  const base = BRANCH_COLORS[branch] || "#78999a";
+  // Keep the muted palette, but use enough opacity to distinguish branches at a glance.
+  const a = n.group === "core" ? 0.92 : (n.group === "case" ? 0.82 : 0.66);
+  const ah = n.group === "core" ? 0.98 : (n.group === "case" ? 0.92 : 0.82);
+  return {
+    background: hexToRgba(base, a),
+    border: base,
+    highlight: { background: hexToRgba(base, ah), border: base },
+    hover: { background: hexToRgba(base, ah), border: base }
+  };
+}
+
+function shortLabel(n) {
+  if (SHORT_LABELS[n.label]) return SHORT_LABELS[n.label];
+
+  if (n.group === "paper") {
+    let t = n.paper_title || n.label || "Paper";
+    // Keep paper nodes compact: first meaningful words only.
+    t = t.replace(/^A\s+/i, "").replace(/^An\s+/i, "").replace(/^The\s+/i, "");
+    const words = t.split(/\s+/).slice(0, 3).join(" ");
+    return words.length > 24 ? words.slice(0, 23) + "…" : words;
+  }
+
+  const t = n.label || "";
+  return t.length > 22 ? t.slice(0, 21) + "…" : t;
+}
+
+const nodes = new vis.DataSet(DATA.nodes.map(n => {
+  // `group` has a special meaning in vis-network and triggers its built-in
+  // blue/yellow/red/green palette. Keep our taxonomy field under a neutral
+  // custom name so the explicitly assigned branch colours win.
+  const { group: taxonomyGroup, ...node } = n;
+  return {
+    ...node,
+    taxonomyGroup,
+    label: shortLabel(n),
+    shape: "dot",
+    font: {
+      face: "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif",
+      size: taxonomyGroup === "root" ? 13 : (taxonomyGroup === "core" ? 12 : (taxonomyGroup === "case" ? 10 : 8.5)),
+      color: "#3f4a53",
+      multi: "html",
+      vadjust: 0
+    },
+    color: nodeColor(n),
+    borderWidth: taxonomyGroup === "root" ? 3.2 : (taxonomyGroup === "core" ? 2.2 : 1.25),
+    shadow: false,
+    scaling: {
+      min: taxonomyGroup === "paper" ? 8 : 11,
+      max: taxonomyGroup === "root" ? 58 : (taxonomyGroup === "core" ? 42 : 32)
+    }
+  };
+}));
+
+function edgeColor(edge) {
+  // Prefer the source case/core so a shared paper can still have correctly
+  // coloured evidence links from different branches.
+  const branch = branchOf(nodeMap[edge.from]) || branchOf(nodeMap[edge.to]);
+  const base = BRANCH_COLORS[branch] || "#78999a";
+  const alpha = edge.dashes ? 0.38 : 0.46;
+  return {
+    color: hexToRgba(base, alpha),
+    highlight: hexToRgba(base, 0.70)
+  };
+}
+
+const initialEdges = DATA.edges.map((e, idx) => ({
+  id: idx + 1,
+  ...e,
+  color: edgeColor(e),
+  smooth: { type: "continuous" },
+  width: e.width || 1
+}));
+const edges = new vis.DataSet(initialEdges);
+
+const container = document.getElementById("network");
+const network = new vis.Network(container, { nodes, edges }, {
+  autoResize: true,
+  physics: {
+    enabled: true,
+    stabilization: { iterations: 1000, fit: true },
+    solver: "forceAtlas2Based",
+    forceAtlas2Based: {
+      gravitationalConstant: -28,
+      centralGravity: 0.008,
+      springLength: 120,
+      springConstant: 0.03,
+      damping: 0.57,
+      avoidOverlap: 1.15
+    }
+  },
+  interaction: {
+    hover: true,
+    tooltipDelay: 120,
+    navigationButtons: false,
+    keyboard: true,
+    dragView: true,
+    zoomView: true
+  },
+  nodes: {
+    chosen: {
+      node: function(values) {
+        values.shadow = true;
+        values.shadowColor = "rgba(120, 82, 125, 0.42)";
+        values.shadowSize = 25;
+      }
+    }
+  },
+  edges: {
+    selectionWidth: 0.5
+  }
+});
+
+let activeId = "root";
+let currentQuery = "";
+// No graph filter is active at first load: keep the complete original map visible.
+let activeView = "all";
+
+const VIEW_GROUPS = {
+  all: new Set(["root", "core", "case", "paper"]),
+  cores: new Set(["root", "core"]),
+  derivatives: new Set(["root", "core", "case"]),
+  evidence: new Set(["case", "paper"])
+};
+
+function isNodeVisibleInActiveView(node) {
+  return VIEW_GROUPS[activeView].has(node.group);
+}
+
+function updateGraphTabState() {
+  document.querySelectorAll(".graph-tab").forEach(tab => {
+    const isActive = tab.dataset.view === activeView;
+    tab.classList.toggle("active-tab", isActive);
+    tab.setAttribute("aria-pressed", String(isActive));
+  });
+}
+
+function connectedIds(nodeId) {
+  return network.getConnectedNodes(nodeId) || [];
+}
+
+function evidenceForCase(caseId) {
+  return DATA.edges
+    .filter(e => e.from === caseId && nodeMap[e.to]?.group === "paper")
+    .map(e => ({ paper: nodeMap[e.to], note: e.note }));
+}
+
+function caseDetailFor(node) {
+  return CASE_DETAILS[node.id] || {
+    how: node.description || node.title || "No detailed case briefing is available yet.",
+    impact: "Impact has not been classified yet.",
+    check: "Add a scenario-specific validation check."
+  };
+}
+
+function evidenceListHtml(caseId) {
+  const evidence = evidenceForCase(caseId);
+  if (!evidence.length) return "<p class=\"subtle\">No linked evidence paper yet.</p>";
+  return `
+    <div class="evidence-heading">Evidence papers (${evidence.length})</div>
+    <ul class="evidence-list">
+      ${evidence.map(({ paper, note }) => `
+        <li>
+          <a class="link" href="${paper.url}" target="_blank" rel="noopener">${paper.paper_title || paper.label}</a><br>
+          <span class="subtle">${paper.venue || "Paper"}</span>
+          ${note ? `<br><span class="evidence-note">${note}</span>` : ""}
+        </li>
+      `).join("")}
+    </ul>
+  `;
+}
+
+function caseCardHtml(caseNode) {
+  const info = caseDetailFor(caseNode);
+  const branch = branchOf(caseNode);
+  return `
+    <article class="case-card" style="--branch: ${BRANCH_COLORS[branch] || "#7a848d"}">
+      <h3>${caseNode.label}</h3>
+      <p>${caseNode.description || caseNode.title || ""}</p>
+      <div class="case-fact"><strong>How it fails:</strong> ${info.how}</div>
+      <div class="case-fact"><strong>Operational impact:</strong> ${info.impact}</div>
+      <div class="case-fact"><strong>What to check:</strong> ${info.check}</div>
+      ${evidenceListHtml(caseNode.id)}
+    </article>
+  `;
+}
+
+function searchableText(node) {
+  const details = CASE_DETAILS[node.id];
+  const detailText = details ? Object.values(details) : [];
+  const overview = node.group === "core" ? [CORE_OVERVIEWS[node.label]] : [];
+  return [node.label, node.title, node.description, node.paper_title, node.venue, ...detailText, ...overview]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function syncActiveListItem() {
+  document.querySelectorAll(".item").forEach(el => {
+    el.classList.toggle("active", el.dataset.id === activeId);
+  });
+}
+
+function openDetail(id) {
+  activeId = id;
+  const n = nodeMap[id];
+  const detail = document.getElementById("detail");
+  const conn = connectedIds(id);
+  let html = "";
+  if (!n) return;
+
+  if (n.group === "root") {
+    html = `
+      <h2>Autonomous Navigation Failures</h2>
+      <div class="meta-row">
+        <span class="pill">Origin node</span>
+        <span class="pill">7 main cores</span>
+        <span class="pill">${DATA.nodes.filter(x => x.group==="case").length} failure cases</span>
+      </div>
+      <p>This map organizes autonomous-navigation failure modes into seven main cores: objective, perception, state estimation, prediction, planning, control, and deployment. The interface and graph styling are intentionally inspired by the Connected Papers visual language: soft teal circles, a pale gray canvas, and a purple selection halo.</p>
+      <p>Click a node to inspect it. Double-click a paper node to open the linked source.</p>
+    `;
+  } else if (n.group === "core") {
+    const caseNodes = DATA.edges
+      .filter(e => e.from === n.id && nodeMap[e.to]?.group === "case")
+      .map(e => nodeMap[e.to]);
+    const evidenceCount = new Set(caseNodes.flatMap(c => evidenceForCase(c.id).map(({ paper }) => paper.id))).size;
+    html = `
+      <h2>${n.label}</h2>
+      <div class="meta-row">
+        <span class="pill">Main core</span>
+        <span class="pill">${caseNodes.length} linked failure cases</span>
+        <span class="pill">${evidenceCount} evidence papers</span>
+      </div>
+      <p class="core-intro">${CORE_OVERVIEWS[n.label] || n.title}</p>
+      <p class="subtle">Case briefing: each card explains the failure mechanism, operational consequence, validation check, and all papers attached to that existing case edge.</p>
+      ${caseNodes.map(caseCardHtml).join("")}
+    `;
+  } else if (n.group === "case") {
+    const info = caseDetailFor(n);
+    const evidence = evidenceForCase(n.id);
+    html = `
+      <h2>${n.label}</h2>
+      <div class="meta-row">
+        <span class="pill">Failure case</span>
+        <span class="pill">${evidence.length} supporting paper${evidence.length===1 ? "" : "s"}</span>
+      </div>
+      <p>${n.description || n.title || ""}</p>
+      <div class="case-fact"><strong>How it fails:</strong> ${info.how}</div>
+      <div class="case-fact"><strong>Operational impact:</strong> ${info.impact}</div>
+      <div class="case-fact"><strong>What to check:</strong> ${info.check}</div>
+      ${evidenceListHtml(n.id)}
+    `;
+  } else if (n.group === "paper") {
+    const supportedCases = DATA.edges
+      .filter(e => e.to === n.id && nodeMap[e.from]?.group === "case")
+      .map(e => nodeMap[e.from].label);
+    html = `
+      <h2>${n.paper_title || n.label}</h2>
+      <div class="meta-row">
+        <span class="pill">Paper</span>
+        <span class="pill">${n.venue || ""}</span>
+        <span class="pill">Supports ${supportedCases.length} case${supportedCases.length===1 ? "" : "s"}</span>
+      </div>
+      <p>This node is a linked source used as evidence for one or more failure cases in the taxonomy.</p>
+      ${supportedCases.length ? `<p><strong>Attached cases:</strong> ${supportedCases.join(" · ")}</p>` : ""}
+      <a class="link" href="${n.url}" target="_blank" rel="noopener">Open paper ↗</a>
+    `;
+  }
+  detail.innerHTML = html;
+  syncActiveListItem();
+}
+
+function focusNode(id) {
+  network.selectNodes([id]);
+  network.focus(id, {
+    scale: nodeMap[id]?.group === "paper" ? 1.25 : 0.95,
+    animation: { duration: 500, easingFunction: "easeInOutQuad" }
+  });
+}
+
+function buildLeftList(query="") {
+  const q = query.trim().toLowerCase();
+  currentQuery = q;
+  const left = document.getElementById("leftList");
+  const counts = document.getElementById("listCounts");
+
+  function matchNode(n) {
+    if (!q) return true;
+    return searchableText(n).includes(q);
+  }
+
+  const visibleNodes = DATA.nodes.filter(n => isNodeVisibleInActiveView(n) && matchNode(n));
+  const coreNodes = visibleNodes.filter(n => n.group === "core");
+  const caseNodes = visibleNodes.filter(n => n.group === "case");
+  const paperNodes = visibleNodes.filter(n => n.group === "paper");
+
+  counts.textContent = `${coreNodes.length} cores · ${caseNodes.length} cases · ${paperNodes.length} papers`;
+
+  function section(title, items, formatter) {
+    if (!items.length) return "";
+    return `
+      <div class="list-section">
+        <div class="section-header">${title}</div>
+        ${items.map(formatter).join("")}
+      </div>
+    `;
+  }
+
+  left.innerHTML = `
+    ${isNodeVisibleInActiveView(nodeMap.root) ? `
+      <div class="item ${activeId === "root" ? "active" : ""}" data-id="root">
+        <div class="item-title">Autonomous Navigation Failures</div>
+        <div class="item-meta">Origin node · overall taxonomy</div>
+      </div>
+    ` : ""}
+    ${section("Main cores", coreNodes, n => `
+      <div class="item ${activeId === n.id ? "active" : ""}" data-id="${n.id}">
+        <div class="item-title">${n.label}</div>
+        <div class="item-meta">Main core</div>
+      </div>
+    `)}
+    ${section("Failure cases", caseNodes, n => `
+      <div class="item ${activeId === n.id ? "active" : ""}" data-id="${n.id}">
+        <div class="item-title">${n.label}</div>
+        <div class="item-meta">${(n.description || "").slice(0, 90)}${(n.description || "").length > 90 ? "..." : ""}</div>
+      </div>
+    `)}
+    ${section("Papers", paperNodes, n => `
+      <div class="item ${activeId === n.id ? "active" : ""}" data-id="${n.id}">
+        <div class="item-title">${n.paper_title || n.label}</div>
+        <div class="item-meta">${n.venue || "Paper"}</div>
+      </div>
+    `)}
+  `;
+
+  document.querySelectorAll(".item").forEach(el => {
+    el.addEventListener("click", () => {
+      const id = el.dataset.id;
+      focusNode(id);
+      openDetail(id);
+    });
+  });
+}
+
+function applyView({ fit = false } = {}) {
+  const matchedIds = new Set(
+    currentQuery
+      ? DATA.nodes.filter(n => searchableText(n).includes(currentQuery)).map(n => n.id)
+      : DATA.nodes.map(n => n.id)
+  );
+  const visibleIds = new Set(DATA.nodes.filter(isNodeVisibleInActiveView).map(n => n.id));
+
+  nodes.update(DATA.nodes.map(n => ({
+    id: n.id,
+    hidden: !visibleIds.has(n.id),
+    opacity: !visibleIds.has(n.id) || matchedIds.has(n.id) ? 1 : 0.18
+  })));
+
+  edges.update(edges.get().map(e => ({
+    id: e.id,
+    hidden: !visibleIds.has(e.from) || !visibleIds.has(e.to) ||
+      (Boolean(currentQuery) && !(matchedIds.has(e.from) || matchedIds.has(e.to)))
+  })));
+
+  buildLeftList(currentQuery);
+  updateGraphTabState();
+  if (fit) network.fit({ animation: true });
+}
+
+function setView(view, { fit = true } = {}) {
+  // Pressing the selected filter again is a quick way back to the unfiltered graph.
+  activeView = activeView === view ? "all" : view;
+  applyView({ fit });
+}
+
+function applySearch(raw) {
+  currentQuery = raw.trim().toLowerCase();
+  applyView();
+  const firstId = DATA.nodes.find(n => isNodeVisibleInActiveView(n) && searchableText(n).includes(currentQuery))?.id;
+  if (currentQuery && firstId) {
+    focusNode(firstId);
+    openDetail(firstId);
+  }
+}
+
+function showOnlyCores() {
+  setView("cores");
+}
+
+function showAll() {
+  setView("all");
+}
+
+network.on("click", function(params) {
+  if (!params.nodes.length) return;
+  const id = params.nodes[0];
+  openDetail(id);
+});
+
+network.on("doubleClick", function(params) {
+  if (!params.nodes.length) return;
+  const id = params.nodes[0];
+  const n = nodeMap[id];
+  if (n && n.group === "paper" && n.url) window.open(n.url, "_blank", "noopener");
+});
+
+document.getElementById("search").addEventListener("input", e => applySearch(e.target.value));
+document.getElementById("fitBtn").addEventListener("click", () => network.fit({ animation: true }));
+document.getElementById("coresBtn").addEventListener("click", showOnlyCores);
+document.getElementById("allBtn").addEventListener("click", showAll);
+document.getElementById("legendCounts").textContent = `${DATA.nodes.filter(n => n.group === "core").length} cores · ${DATA.nodes.filter(n => n.group === "case").length} cases · ${DATA.nodes.filter(n => n.group === "paper").length} papers`;
+document.querySelectorAll(".graph-tab").forEach(tab => {
+  tab.addEventListener("click", () => setView(tab.dataset.view));
+});
+
+applyView();
+openDetail("root");
+setTimeout(() => network.fit({ animation: false }), 350);
+</script>
+</body>
+</html>

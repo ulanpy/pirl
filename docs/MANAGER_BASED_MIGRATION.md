@@ -6,7 +6,7 @@ Move PIRL from a task-specific `DirectRLEnv` lifecycle to Isaac Lab's
 `ManagerBasedRLEnv` while preserving the policy contract:
 
 - action: normalized `[linear, yaw]`;
-- observation: `{"policy": {"vec": [N, 34], "costmap": [N, 2, 100, 100]}}`;
+- observation: `{"policy": {"vec": [N, 34], "costmap": [N, 1, 100, 100]}}`;
 - recurrent state remains entirely in the policy;
 - reward and termination semantics stay explicit and independently configurable.
 

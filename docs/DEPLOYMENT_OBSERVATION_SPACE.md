@@ -1,4 +1,4 @@
-# Observation schema cookbook для ROS2/Nav2 деплоя
+# Observation schema cookbook для ROS2 deployment
 
 Этот документ фиксирует актуальный контракт между Isaac training и физическим ROS2 контроллером.
 `vec` содержит состояние робота, ошибки пути, локальное окно пути и рекуррентную memory tail.
@@ -9,7 +9,7 @@ ONNX policy принимает:
 
 ```text
 vec:       float32[1, 34]
-costmap:   float32[1, 2, 100, 100]
+costmap:   float32[1, 1, 100, 100]
 rnn_state: float32[1, 1, 256]
 ```
 
@@ -27,9 +27,8 @@ rnn_state_out: float32[1, 1, 256]
 
 - Odometry: `/odom` (`nav_msgs/Odometry`) или эквивалентный state estimator.
 - TF: `map/odom -> base_link` для трансформации пути в frame робота.
-- Path: `nav_msgs/Path` из Nav2 planner/controller pipeline.
-- Local costmap: Nav2 local costmap data, обычно `nav2_msgs/Costmap` или `nav_msgs/OccupancyGrid`-подобный wrapper,
-  в зависимости от интеграции.
+- Path: `nav_msgs/Path` или эквивалентный путь от внешнего planner.
+- LiDAR: `sensor_msgs/LaserScan` или эквивалентный 2D ray sensor. Из одного current scan строится evidence map.
 - Last action: последнее действие, отправленное ONNX/controller pipeline.
 - Rewarder block: локальный блок, который считает те же reward components, что использовались при training.
 
@@ -45,7 +44,7 @@ prev_reward_components = zeros[4]
 
 На каждом control tick:
 
-1. Собрать текущий `costmap[2,100,100]`.
+1. Собрать текущий `costmap[1,100,100]`.
 2. Собрать `vec[34]`.
 3. Вызвать ONNX.
 4. Сохранить `rnn_state_out` как следующий `rnn_state`.
@@ -57,7 +56,7 @@ prev_reward_components = zeros[4]
 Форма:
 
 ```text
-costmap = float32[2, 100, 100]
+costmap = float32[1, 100, 100]
 ```
 
 Физический размер:
@@ -68,46 +67,33 @@ resolution:     0.05 m/cell
 grid:           100 x 100
 ```
 
-Текущий costmap кодируется двумя каналами:
+Текущая карта — это одноканальная бинарная LiDAR hit-occupancy map:
 
 ```text
-cost       = 0.0 if unknown, otherwise nav2_cost / 254.0
-known_mask = 0.0 if unknown, otherwise 1.0
+occupied = 1.0 в cell с конечной точкой LiDAR hit, иначе 0.0
 ```
 
-Порядок каналов:
+Единственный channel:
 
 ```text
-0: cost
-1: known_mask
+0: occupied
 ```
 
-Nav2 cost values:
+Это не Nav2 costmap: в input нет inflation, inscribed/lethal cost, free-space rasterization
+или заранее заданного поля clearance. Cell без hit имеет `occupied=0` независимо от того,
+была ли она видна текущим scan.
 
-```text
-0       free
-1..252  inflated/graded cost
-253     inscribed
-254     lethal obstacle
-255     unknown
-```
-
-Пример C++-style логики:
+Пример C++-style rasterization одного scan:
 
 ```cpp
-float cost_channel(uint8_t nav2_cost) {
-  if (nav2_cost == 255) {
-    return 0.0f;
+for (const Ray& ray : lidar_scan) {
+  if (ray.range < lidar_max_range) {
+    rasterize_endpoint(ray.endpoint, occupied_channel);
   }
-  return static_cast<float>(nav2_cost) / 254.0f;
-}
-
-float known_mask(uint8_t nav2_cost) {
-  return nav2_cost == 255 ? 0.0f : 1.0f;
 }
 ```
 
-На reset текущий costmap заполняется unknown, то есть все `cost=0`, все `known_mask=0`.
+Карта строится заново из current scan на каждом control tick; temporal fusion не используется.
 
 ## Vec Tensor
 
@@ -235,11 +221,11 @@ struct PirlRuntimeState {
 Observation build_observation(
     const nav_msgs::msg::Odometry& odom,
     const nav_msgs::msg::Path& path,
-    const Nav2Costmap& local_costmap,
+    const sensor_msgs::msg::LaserScan& lidar_scan,
     PirlRuntimeState& state) {
   Observation obs;
 
-  obs.costmap = encode_costmap(local_costmap);
+  obs.costmap = rasterize_lidar_evidence(lidar_scan);
 
   PathAdapterResult path_result = adapt_path_to_base_link(path);
   obs.vec[0] = body_vx(odom);
@@ -278,7 +264,7 @@ outputs:
 Loop:
 
 ```cpp
-auto obs = build_observation(odom, path, local_costmap, state);
+auto obs = build_observation(odom, path, lidar_scan, state);
 auto [mean, next_rnn_state] = policy_onnx.run(obs.vec, obs.costmap, state.rnn_state);
 
 state.rnn_state = next_rnn_state;
@@ -292,8 +278,8 @@ cmd_vel.angular.z = mean[1] * 1.5f;
 ## Checklist
 
 - `vec` shape is exactly `[1, 34]`.
-- `costmap` shape is exactly `[1, 2, 100, 100]`.
-- Costmap channel order is `[cost, known_mask]` for the current frame.
+- `costmap` shape is exactly `[1, 1, 100, 100]`.
+- Единственный costmap channel — binary `occupied` для current frame.
 - Path window is 12 points in `base_link`, resampled at `0.10 m`.
 - `d_signed` and `heading_error` use the same path adapter as the rewarder.
 - `prev_action` is the previous normalized ONNX action, not physical `cmd_vel`.

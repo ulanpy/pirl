@@ -29,20 +29,13 @@ def main() -> None:
         grid_size_m=5.0,
         grid_resolution=0.05,
         grid_width_cells=100,
-        grid_free_cost=0.0,
-        grid_inscribed_cost=253.0,
-        grid_lethal_cost=254.0,
-        grid_unknown_cost=255.0,
-        grid_inflation_radius_m=0.55,
-        grid_cost_scaling_factor=10.0,
-        grid_normalize=True,
-        grid_channels=2,
+        grid_channels=1,
         path_segment_len=12,
         reward_component_dim=4,
         lidar_horizontal_fov_range=(-180.0, 180.0),
         lidar_horizontal_res=1.0,
         lidar_num_rays=360,
-        lidar=SimpleNamespace(max_distance=18.0),
+        lidar_max_distance=18.0,
     )
     expected_vec_dim = (
         2
@@ -59,12 +52,17 @@ def main() -> None:
 
     LocalCostmapBuilder = _load_costmap_builder()
     builder = LocalCostmapBuilder(cfg, device="cpu", num_envs=1)
-    lidar_ranges = torch.full((1, cfg.lidar_num_rays), float(cfg.lidar.max_distance))
+    lidar_ranges = torch.full((1, cfg.lidar_num_rays), float(cfg.lidar_max_distance))
     costmap = builder.build_image(lidar_ranges)
     if tuple(costmap.shape) != (1, *expected_costmap_shape):
         raise AssertionError(f"built costmap shape mismatch: {tuple(costmap.shape)}")
     if torch.any(costmap < 0.0) or torch.any(costmap > 1.0):
         raise AssertionError("Costmap channels must be in [0, 1].")
+
+    one_hit = lidar_ranges.clone()
+    one_hit[0, 0] = 1.0
+    if torch.count_nonzero(builder.build_image(one_hit)) != 1:
+        raise AssertionError("A finite LiDAR endpoint must rasterize to exactly one occupied cell.")
 
     print("Observation schema OK")
     print(f"vec: {(expected_vec_dim,)}")
